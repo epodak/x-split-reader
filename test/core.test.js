@@ -12,6 +12,7 @@ const {
   compactTweetTextNode,
   splitParagraphs,
   renderStructuredText,
+  isSupportedRoute,
   normalizeFxConversation
 } = require('../x-split-reader.user.js');
 
@@ -203,5 +204,18 @@ test('renderStructuredText renders semantic paragraph elements when multiple par
   } finally {
     global.document = origDocument;
   }
+});
+
+test('isSupportedRoute identifies timeline/tweet paths vs native multi-pane paths', () => {
+  assert.equal(isSupportedRoute('/home'), true);
+  assert.equal(isSupportedRoute('/dotey/status/123456'), true);
+  assert.equal(isSupportedRoute('/explore'), true);
+  assert.equal(isSupportedRoute('/search?q=test'), true);
+  assert.equal(isSupportedRoute('/messages'), false);
+  assert.equal(isSupportedRoute('/messages/123-456'), false);
+  assert.equal(isSupportedRoute('/settings'), false);
+  assert.equal(isSupportedRoute('/settings/account'), false);
+  assert.equal(isSupportedRoute('/i/flow/login'), false);
+  assert.equal(isSupportedRoute('/compose/tweet'), false);
 });
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Split Reader
 // @namespace    https://github.com/epodak/x-split-reader
-// @version      0.3.3
+// @version      0.3.4
 // @description  Compact split reader for X: fixed-width timeline plus adaptive post/replies pane.
 // @author       Feng Lu
 // @license      MIT
@@ -115,6 +115,11 @@
         };
       }
     } catch (_) {}
+  }
+
+  function isSupportedRoute(pathname = (typeof location !== 'undefined' ? location.pathname : '')) {
+    if (!pathname) return true;
+    return !/^\/(messages|settings|i\/flow|analytics|compose)/.test(pathname);
   }
 
   function clamp(value, min, max) {
@@ -715,6 +720,7 @@
       this.renderer = null;
       this.requestVersion = 0;
       this.lastItems = [];
+      this.evading = false;
       this.onScroll = this.onScroll.bind(this);
       this.onKeyDown = this.onKeyDown.bind(this);
       this.onClick = this.onClick.bind(this);
@@ -750,6 +756,27 @@
       }
     }
 
+    setEvasion(active) {
+      this.evading = Boolean(active);
+      if (this.evading) {
+        document.documentElement.classList.add('xsr-evading');
+      } else {
+        document.documentElement.classList.remove('xsr-evading');
+      }
+    }
+
+    checkEvasion() {
+      if (!this.enabled) return;
+      const hasActiveModal = Boolean(document.querySelector('#layers [role="dialog"], #layers [aria-modal="true"]'));
+      const supported = isSupportedRoute();
+
+      if (hasActiveModal || !supported) {
+        if (!this.evading) this.setEvasion(true);
+      } else if (this.evading) {
+        this.setEvasion(false);
+      }
+    }
+
     initObserver() {
       if (this.observer) return;
       let timer = null;
@@ -758,6 +785,7 @@
         timer = setTimeout(() => {
           timer = null;
           this.compactNativeTweets();
+          this.checkEvasion();
           if (!this.activeId || this.mode === 'FOLLOW') this.evaluate(false);
         }, 150);
       });
@@ -833,7 +861,8 @@
     onScroll() {
       this.clearHoverTimer();
       this.compactNativeTweets();
-      if (!this.enabled || this.raf) return;
+      this.checkEvasion();
+      if (!this.enabled || this.evading || this.raf) return;
       this.raf = requestAnimationFrame(() => {
         this.raf = null;
         const now = performance.now();
@@ -844,7 +873,7 @@
     }
 
     evaluate(force) {
-      if (!this.enabled || this.mode === 'PINNED') return;
+      if (!this.enabled || this.mode === 'PINNED' || this.evading || !isSupportedRoute()) return;
       const items = this.scanner.scan();
       this.lastItems = items;
       const winner = chooseActiveCandidate(items, window.innerHeight * CONFIG.readingLineRatio);
@@ -1015,6 +1044,24 @@
       if (!this.enabled || event.defaultPrevented || event.button !== 0) return;
       if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
       if (event.target.closest('#xsr-pane')) return;
+
+      // 1. 侧边栏/导航栏点击：发帖、私信、通知、书签、更多等，右侧边栏主动消失避让
+      const banner = event.target.closest('header[role="banner"]');
+      if (banner) {
+        const interactive = event.target.closest('a, button, [role="button"]');
+        if (interactive) {
+          this.setEvasion(true);
+        }
+        return;
+      }
+
+      // 2. 检查是否有处于激活状态的模态弹窗；如无弹窗且处于支持路由，恢复分栏
+      if (this.evading) {
+        const hasActiveModal = Boolean(document.querySelector('#layers [role="dialog"], #layers [aria-modal="true"]'));
+        if (!hasActiveModal && isSupportedRoute()) {
+          this.setEvasion(false);
+        }
+      }
 
       const article = event.target.closest('article[data-testid="tweet"]');
       if (!article) return;
@@ -1243,6 +1290,22 @@
         padding: 0 !important;
         user-select: none !important;
         pointer-events: none !important;
+      }
+
+      /* === 2.2 全局弹窗与侧边栏操作自动避让（彻底消除遮挡） === */
+      html.xsr-enabled:has(#layers [role="dialog"]) #xsr-pane,
+      html.xsr-enabled:has(#layers [aria-modal="true"]) #xsr-pane,
+      html.xsr-enabled.xsr-evading #xsr-pane {
+        display: none !important;
+      }
+
+      /* 当弹窗激活或避让时，主时间线列恢复自然流动，原生弹窗在视口中无遮挡居中 */
+      html.xsr-enabled:has(#layers [role="dialog"]) main[role="main"],
+      html.xsr-enabled:has(#layers [aria-modal="true"]) main[role="main"],
+      html.xsr-enabled.xsr-evading main[role="main"] {
+        width: auto !important;
+        max-width: 100% !important;
+        margin-right: auto !important;
       }
 
       /* === 3. 右侧 Detail 分栏 (#xsr-pane) === */
@@ -1539,6 +1602,7 @@
     compactTweetTextNode,
     splitParagraphs,
     renderStructuredText,
+    isSupportedRoute,
     normalizeFxStatus,
     normalizeFxConversation
   };
@@ -1549,7 +1613,7 @@
     installCompactViewportSpoof();
     const bootstrap = () => {
       if (window.top !== window.self) return;
-      console.log('%c[X Split Reader] v0.3.3 Active%c (Paragraph Normalizer & Compact Text Ready)', 'color: #1d9bf0; font-weight: bold;', 'color: gray;');
+      console.log('%c[X Split Reader] v0.3.4 Active%c (Global Modal & Sidebar Evasion Ready)', 'color: #1d9bf0; font-weight: bold;', 'color: gray;');
       const app = new XSplitReader();
       app.start();
       window.__XSplitReader = app;
