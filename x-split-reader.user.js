@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Split Reader
 // @namespace    https://github.com/epodak/x-split-reader
-// @version      0.3.0
+// @version      0.3.2
 // @description  Compact split reader for X: fixed-width timeline plus adaptive post/replies pane.
 // @author       Feng Lu
 // @license      MIT
@@ -128,10 +128,29 @@
   }
 
   function formatMetric(value) {
-    const number = Number(value || 0);
-    if (number >= 1_000_000) return `${(number / 1_000_000).toFixed(number >= 10_000_000 ? 0 : 1)}M`;
-    if (number >= 1_000) return `${(number / 1_000).toFixed(number >= 100_000 ? 0 : 1)}K`;
-    return String(number);
+    const num = Number(value) || 0;
+    if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+    if (num >= 1_000) return `${(num / 1_000).toFixed(1).replace(/\.0$/, '')}K`;
+    return num ? String(num) : '0';
+  }
+
+  function formatTweetDate(dateStr) {
+    if (!dateStr) return '';
+    try {
+      const date = new Date(dateStr);
+      if (Number.isNaN(date.getTime())) return '';
+      const diffSec = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
+      if (diffSec < 60) return 'just now';
+      const diffMin = Math.floor(diffSec / 60);
+      if (diffMin < 60) return `${diffMin}m`;
+      const diffHour = Math.floor(diffMin / 60);
+      if (diffHour < 24) return `${diffHour}h`;
+      const diffDay = Math.floor(diffHour / 24);
+      if (diffDay < 30) return `${diffDay}d`;
+      return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    } catch (_) {
+      return '';
+    }
   }
 
   function sanitizeUrl(value, fallback = '#') {
@@ -567,11 +586,14 @@
       avatar.alt = '';
       avatar.loading = 'lazy';
       const identity = element('div', 'xsr-identity');
-      const name = element('strong', '', tweet.author.name);
+      const name = element('strong', 'xsr-name', tweet.author.name);
       if (tweet.author.verified) name.append(' ✓');
-      identity.append(name, element('span', '', tweet.author.handle));
-      const date = element('time', 'xsr-date', tweet.createdAt ? new Date(tweet.createdAt).toLocaleString() : '');
-      header.append(avatar, identity, date);
+      const handle = element('span', 'xsr-handle', tweet.author.handle);
+      const dot = element('span', 'xsr-sep', '·');
+      const date = element('time', 'xsr-date', formatTweetDate(tweet.createdAt));
+      if (tweet.createdAt) date.title = new Date(tweet.createdAt).toLocaleString();
+      identity.append(name, handle, dot, date);
+      header.append(avatar, identity);
       article.append(header, element('div', 'xsr-text', tweet.text || ''));
       if (tweet.media && tweet.media.length) {
         const media = element('div', `xsr-media count-${tweet.media.length}`);
@@ -641,6 +663,7 @@
       this.onScroll();
       [100, 300, 700, 1500, 3000].forEach((delay) => {
         setTimeout(() => {
+          this.applyArticleCompactStyle();
           if (this.enabled && !this.activeId) this.evaluate(true);
         }, delay);
       });
@@ -663,11 +686,99 @@
         if (!this.enabled || timer) return;
         timer = setTimeout(() => {
           timer = null;
+          this.applyArticleCompactStyle();
           if (!this.activeId || this.mode === 'FOLLOW') this.evaluate(false);
         }, 150);
       });
       const target = document.body || document.documentElement;
       if (target) this.observer.observe(target, { childList: true, subtree: true });
+    }
+
+    applyArticleCompactStyle() {
+      if (!this.enabled) return;
+      const headings = document.querySelectorAll('h1, h2, [role="heading"], div[dir="ltr"] > span');
+      let hasArticleHeader = false;
+      for (const el of headings) {
+        const txt = el.textContent?.trim();
+        if (txt === 'Article' || txt === '文章') {
+          hasArticleHeader = true;
+          break;
+        }
+      }
+
+      const articleEl = document.querySelector('[data-testid*="rticle"], [data-testid*="Article"], [data-testid*="article"]');
+      if (!hasArticleHeader && !articleEl) return;
+
+      const container = articleEl || document.querySelector('[data-testid="primaryColumn"]') || document.querySelector('main[role="main"]');
+      if (!container) return;
+
+      if (!container.classList.contains('xsr-compact-article-scope')) {
+        container.classList.add('xsr-compact-article-scope');
+      }
+
+      // 1. 限制长文容器最大宽度为 680px，留出舒适的阅读呼吸列
+      if (articleEl) {
+        articleEl.style.setProperty('max-width', '680px', 'important');
+      }
+
+      // 2. 遍历长文段落与块级容器，强制收敛段落间距，压缩作者敲出来的连续空白行
+      const blocks = container.querySelectorAll('div[dir="auto"], div[dir="ltr"], p');
+      blocks.forEach((block) => {
+        if (block.closest('header[role="banner"], #xsr-pane, nav, [role="button"], button')) return;
+
+        const text = block.textContent?.trim();
+        // 空行处理：如果只有 <br> 或没有文字，将高度压缩为 6px，消灭巨大空隙
+        if (!text || block.innerHTML === '<br>' || block.querySelector('br:only-child')) {
+          block.style.setProperty('height', '6px', 'important');
+          block.style.setProperty('min-height', '6px', 'important');
+          block.style.setProperty('margin-top', '0px', 'important');
+          block.style.setProperty('margin-bottom', '2px', 'important');
+          block.style.setProperty('padding-top', '0px', 'important');
+          block.style.setProperty('padding-bottom', '0px', 'important');
+          return;
+        }
+
+        // 正常段落块：收紧下边距为 8px，清除多余内边距
+        block.style.setProperty('margin-top', '0px', 'important');
+        block.style.setProperty('margin-bottom', '8px', 'important');
+        block.style.setProperty('padding-top', '0px', 'important');
+        block.style.setProperty('padding-bottom', '0px', 'important');
+
+        // 段落外层的父级 div 也常带有推特原子类的巨大间距，一并收敛
+        const parent = block.parentElement;
+        if (parent && parent !== container && !parent.closest('header[role="banner"], #xsr-pane')) {
+          parent.style.setProperty('margin-top', '0px', 'important');
+          parent.style.setProperty('margin-bottom', '0px', 'important');
+          parent.style.setProperty('padding-top', '0px', 'important');
+          parent.style.setProperty('padding-bottom', '0px', 'important');
+        }
+      });
+
+      // 3. 遍历文本叶子节点，强制字号 15px/1.58，标题 17px/1.35
+      const textNodes = container.querySelectorAll('span, div[dir="auto"], div[dir="ltr"]');
+      textNodes.forEach((node) => {
+        if (node.closest('header[role="banner"], #xsr-pane, nav, [role="button"], button')) return;
+        const text = node.textContent?.trim();
+        if (!text) return;
+
+        const isHeading = node.closest('h1, h2, h3, [role="heading"]') ||
+          node.tagName === 'STRONG' ||
+          node.closest('strong') ||
+          (text.length < 40 && (node.matches('[style*="font-size: 20"], [style*="font-size: 24"], [style*="font-size: 28"]') || node.matches('[class*="r-1b43r93"]')));
+
+        if (isHeading) {
+          node.style.setProperty('font-size', '17px', 'important');
+          node.style.setProperty('line-height', '1.35', 'important');
+          node.style.setProperty('font-weight', '700', 'important');
+          if (node.parentElement) {
+            node.parentElement.style.setProperty('margin-top', '14px', 'important');
+            node.parentElement.style.setProperty('margin-bottom', '6px', 'important');
+          }
+        } else if (node.childElementCount === 0) {
+          node.style.setProperty('font-size', '15px', 'important');
+          node.style.setProperty('line-height', '1.58', 'important');
+        }
+      });
     }
 
     toggleShowPost() {
@@ -802,6 +913,13 @@
       // 核心基准：以最近一次滚动触发的推文为基准（或当前高亮推文）
       const baselineArticle = this.scrollTriggeredArticle || document.querySelector('article.xsr-active-tweet');
       if (!baselineArticle) return;
+
+      // 虚拟列表边界：推特虚拟滚动可能卸载 DOM 节点，Disconnected 节点严禁参与文档位置判定
+      if (!baselineArticle.isConnected || !article.isConnected) {
+        if (!baselineArticle.isConnected) this.scrollTriggeredArticle = null;
+        this.clearHoverTimer();
+        return;
+      }
 
       // 核心边界：必须在当前基准推文的【下方】
       // 移动到原本触发 timeline 以上严格无效
@@ -1114,6 +1232,63 @@
         background: color-mix(in srgb, var(--xsr-accent) 5%, transparent);
       }
 
+      /* === 2.1 X 官方长文 (X Articles / Notes) 紧凑化排版优化 === */
+      html.xsr-enabled .xsr-compact-article-scope,
+      html.xsr-enabled [data-testid*="rticle"],
+      html.xsr-enabled [data-testid*="Article"],
+      html.xsr-enabled [data-testid*="article"] {
+        font-size: 15px !important;
+        line-height: 1.58 !important;
+        max-width: 680px !important;
+      }
+      html.xsr-enabled .xsr-compact-article-scope span,
+      html.xsr-enabled .xsr-compact-article-scope div[dir],
+      html.xsr-enabled [data-testid*="rticle"] span,
+      html.xsr-enabled [data-testid*="rticle"] div[dir],
+      html.xsr-enabled [data-testid*="Article"] span,
+      html.xsr-enabled [data-testid*="Article"] div[dir],
+      html.xsr-enabled [data-testid*="article"] span,
+      html.xsr-enabled [data-testid*="article"] div[dir] {
+        font-size: 15px !important;
+        line-height: 1.58 !important;
+      }
+      html.xsr-enabled .xsr-compact-article-scope [role="heading"] *,
+      html.xsr-enabled .xsr-compact-article-scope h1 *,
+      html.xsr-enabled .xsr-compact-article-scope h2 *,
+      html.xsr-enabled .xsr-compact-article-scope strong,
+      html.xsr-enabled .xsr-compact-article-scope strong *,
+      html.xsr-enabled [data-testid*="rticle"] [role="heading"] *,
+      html.xsr-enabled [data-testid*="rticle"] h1 *,
+      html.xsr-enabled [data-testid*="rticle"] h2 * {
+        font-size: 17px !important;
+        line-height: 1.35 !important;
+        font-weight: 700 !important;
+      }
+      html.xsr-enabled .xsr-compact-article-scope div[dir="auto"],
+      html.xsr-enabled [data-testid*="rticle"] div[dir="auto"],
+      html.xsr-enabled .xsr-compact-article-scope div[dir="ltr"],
+      html.xsr-enabled [data-testid*="rticle"] div[dir="ltr"],
+      html.xsr-enabled .xsr-compact-article-scope p,
+      html.xsr-enabled [data-testid*="rticle"] p {
+        margin-top: 0 !important;
+        margin-bottom: 8px !important;
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
+      }
+      html.xsr-enabled .xsr-compact-article-scope div:has(> br:only-child),
+      html.xsr-enabled [data-testid*="rticle"] div:has(> br:only-child) {
+        height: 6px !important;
+        min-height: 6px !important;
+        margin: 0 !important;
+        padding: 0 !important;
+      }
+      html.xsr-enabled .xsr-compact-article-scope blockquote,
+      html.xsr-enabled [data-testid*="rticle"] blockquote {
+        margin: 8px 0 !important;
+        padding: 4px 12px !important;
+        font-size: 14.5px !important;
+      }
+
       /* === 3. 右侧 Detail 分栏 (#xsr-pane) === */
       html.xsr-enabled #xsr-pane {
         display: flex;
@@ -1129,7 +1304,9 @@
         color: var(--xsr-text);
         background: var(--xsr-bg);
         border-left: 1px solid var(--xsr-border);
-        font-family: TwitterChirp, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", "WenQuanYi Micro Hei", sans-serif;
+        text-rendering: optimizeLegibility;
+        -webkit-font-smoothing: antialiased;
       }
       .xsr-divider {
         position: absolute;
@@ -1207,8 +1384,9 @@
       .xsr-focus-column, .xsr-reply-column { min-width: 0; }
       .xsr-detail-grid.is-comment-layout .xsr-reply-column {
         width: 100%;
-        max-width: 860px;
+        max-width: 660px;
         margin: 0 auto;
+        padding: 0 16px;
       }
 
       /* Mini Anchor：纯评论视图顶部的超轻量单行作者锚点 */
@@ -1216,9 +1394,9 @@
         display: flex;
         align-items: center;
         gap: 8px;
-        padding: 6px 12px;
-        background: color-mix(in srgb, var(--xsr-text) 3%, var(--xsr-bg));
-        border-bottom: 1px solid var(--xsr-border);
+        padding: 8px 14px;
+        background: color-mix(in srgb, var(--xsr-text) 2.5%, var(--xsr-bg));
+        border-bottom: 1px solid color-mix(in srgb, var(--xsr-border) 60%, transparent);
         font-size: 12px;
       }
       .xsr-mini-avatar {
@@ -1256,22 +1434,99 @@
       .xsr-empty-icon { font-size: 32px; color: var(--xsr-accent); }
       .xsr-empty h2 { margin: 8px 0 4px; font-size: 16px; color: var(--xsr-text); }
       .xsr-empty p { max-width: 320px; margin: 0; font-size: 13px; line-height: 1.4; }
-      .xsr-tweet { padding: 10px 12px; border-bottom: 1px solid var(--xsr-border); cursor: pointer; }
-      .xsr-tweet:hover { background: color-mix(in srgb, var(--xsr-text) 3%, transparent); }
-      .xsr-tweet.is-prominent { padding-top: 12px; }
-      .xsr-tweet-header { display: flex; align-items: center; gap: 8px; }
-      .xsr-avatar { width: 36px; height: 36px; flex: 0 0 auto; border-radius: 50%; object-fit: cover; background: var(--xsr-border); }
-      .xsr-identity { min-width: 0; display: flex; flex-direction: column; line-height: 1.2; }
-      .xsr-identity strong, .xsr-identity span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .xsr-identity strong { font-size: 13px; }
-      .xsr-identity span, .xsr-date, .xsr-muted { color: var(--xsr-muted); font-size: 12px; }
-      .xsr-date { margin-left: auto; font-size: 11px; white-space: nowrap; }
-      .xsr-text { margin-top: 6px; font-size: 14px; line-height: 1.38; white-space: pre-wrap; overflow-wrap: anywhere; }
-      .xsr-tweet.is-prominent .xsr-text { font-size: 15px; line-height: 1.42; }
-      .xsr-media { display: grid; grid-template-columns: repeat(2, 1fr); gap: 2px; max-height: 320px; margin-top: 8px; overflow: hidden; border: 1px solid var(--xsr-border); border-radius: 12px; }
+      .xsr-tweet {
+        padding: 12px 14px;
+        border-bottom: 1px solid color-mix(in srgb, var(--xsr-border) 65%, transparent);
+        cursor: pointer;
+        transition: background 0.12s ease;
+      }
+      .xsr-tweet:hover {
+        background: color-mix(in srgb, var(--xsr-text) 3%, transparent);
+      }
+      .xsr-tweet.is-prominent {
+        padding: 16px 14px 14px;
+        border-bottom: 1px solid var(--xsr-border);
+      }
+      .xsr-tweet-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .xsr-avatar {
+        width: 36px;
+        height: 36px;
+        flex: 0 0 auto;
+        border-radius: 50%;
+        object-fit: cover;
+        background: var(--xsr-border);
+      }
+      .xsr-identity {
+        min-width: 0;
+        display: flex;
+        align-items: baseline;
+        flex-wrap: wrap;
+        column-gap: 6px;
+        row-gap: 2px;
+        line-height: 1.3;
+      }
+      .xsr-name {
+        font-size: 14px;
+        font-weight: 650;
+        color: var(--xsr-text);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .xsr-handle {
+        font-size: 12.5px;
+        color: var(--xsr-muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .xsr-sep {
+        font-size: 12px;
+        color: var(--xsr-muted);
+        user-select: none;
+      }
+      .xsr-date {
+        font-size: 11.5px;
+        color: var(--xsr-muted);
+        white-space: nowrap;
+      }
+      .xsr-text {
+        margin-top: 8px;
+        font-size: 15px;
+        line-height: 1.58;
+        letter-spacing: -0.01em;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      .xsr-tweet.is-prominent .xsr-text {
+        font-size: 16px;
+        line-height: 1.6;
+      }
+      .xsr-media {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 2px;
+        max-height: 320px;
+        margin-top: 10px;
+        overflow: hidden;
+        border: 1px solid color-mix(in srgb, var(--xsr-border) 75%, transparent);
+        border-radius: 12px;
+      }
       .xsr-media.count-1 { grid-template-columns: 1fr; }
       .xsr-media img { width: 100%; height: 100%; min-height: 120px; max-height: 320px; object-fit: cover; }
-      .xsr-metrics { display: flex; justify-content: space-around; gap: 8px; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--xsr-border); color: var(--xsr-muted); font-size: 11px; }
+      .xsr-metrics {
+        display: flex;
+        gap: 24px;
+        margin-top: 10px;
+        border-top: none;
+        color: var(--xsr-muted);
+        font-size: 12px;
+        letter-spacing: 0.02em;
+      }
       .xsr-section-title { position: sticky; z-index: 1; top: 0; margin: 0; padding: 6px 12px; border-bottom: 1px solid var(--xsr-border); background: color-mix(in srgb, var(--xsr-bg) 94%, transparent); backdrop-filter: blur(8px); font-size: 12px; font-weight: 700; }
       .xsr-section > .xsr-muted { padding: 12px; }
       .xsr-no-replies { text-align: center; padding: 24px !important; color: var(--xsr-muted); }
@@ -1318,6 +1573,7 @@
     chooseActiveCandidate,
     extractTweetIdFromHref,
     formatMetric,
+    formatTweetDate,
     normalizeFxStatus,
     normalizeFxConversation
   };
@@ -1328,6 +1584,7 @@
     installCompactViewportSpoof();
     const bootstrap = () => {
       if (window.top !== window.self) return;
+      console.log('%c[X Split Reader] v0.3.1 Active%c (Typography & Article Compact Ready)', 'color: #1d9bf0; font-weight: bold;', 'color: gray;');
       const app = new XSplitReader();
       app.start();
       window.__XSplitReader = app;

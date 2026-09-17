@@ -8,6 +8,7 @@ const {
   chooseActiveCandidate,
   extractTweetIdFromHref,
   formatMetric,
+  formatTweetDate,
   normalizeFxConversation
 } = require('../x-split-reader.user.js');
 
@@ -67,5 +68,15 @@ test('small helpers clamp and format values', () => {
   assert.equal(clamp(80, 30, 55), 55);
   assert.equal(formatMetric(1234), '1.2K');
   assert.equal(formatMetric(2_400_000), '2.4M');
+  const nowIso = new Date().toISOString();
+  assert.equal(formatTweetDate(nowIso), 'just now');
+  const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  assert.equal(formatTweetDate(tenMinAgo), '10m');
+  const twoHoursAgo = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
+  assert.equal(formatTweetDate(twoHoursAgo), '2h');
+  const threeDaysAgo = new Date(Date.now() - 3 * 86400 * 1000).toISOString();
+  assert.equal(formatTweetDate(threeDaysAgo), '3d');
+  assert.equal(formatTweetDate(''), '');
+  assert.equal(formatTweetDate('invalid-date'), '');
 });
 

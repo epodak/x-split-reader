@@ -58,25 +58,10 @@ Timeline DOM -> Tweet ID -> Focus Tracker -> Active Tweet
 若要在本地 IDE (如 VS Code) 中修改代码并在浏览器即时生效：
 
 1. 打开浏览器扩展管理页面，进入 **Tampermonkey** 详情页，勾选 **“允许访问文件网址”** (Allow access to file URLs)。
-2. 在 Tampermonkey 中新建脚本，粘贴 [`local-dev.user.js`](./local-dev.user.js) 的内容（通过 `@require file://...` 直连本地脚本绝对路径）：
-
-```javascript
-// ==UserScript==
-// @name         X Split Reader (Local Dev)
-// @namespace    https://github.com/epodak/x-split-reader
-// @version      0.3.0
-// @match        https://x.com/*
-// @match        https://twitter.com/*
-// @connect      api.fxtwitter.com
-// @grant        GM_xmlhttpRequest
-// @grant        GM_addStyle
-// @grant        GM_registerMenuCommand
-// @run-at       document-start
-// @require      file://D:/_AI/10_DOING/x-split-reader/x-split-reader.user.js
-// ==/UserScript==
-```
-
-3. 之后在本地编辑保存 `x-split-reader.user.js` 后，在 X 网页按 `F5` 即可直接执行最新代码，无需重复粘贴。
+2. 参考 [`local-dev.user.example.js`](./local-dev.user.example.js)，复制一份为 `local-dev.user.js`（已配置 gitignore，不会被误提交）：
+   将里面的 `@require file://...` 路径修改为你的本地代码绝对路径。
+3. 在 Tampermonkey 中新建脚本，将 `local-dev.user.js` 内容复制保存进去。
+4. 之后在本地编辑保存 `x-split-reader.user.js` 后，在 X 网页按 `F5` 即可直接执行最新代码，无需重复粘贴。
 
 ## 本地验证
 
