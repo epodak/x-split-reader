@@ -14,6 +14,8 @@
 // @run-at       document-start
 // @homepageURL  https://github.com/epodak/x-split-reader
 // @supportURL   https://github.com/epodak/x-split-reader/issues
+// @downloadURL  https://raw.githubusercontent.com/epodak/x-split-reader/main/x-split-reader.user.js
+// @updateURL    https://raw.githubusercontent.com/epodak/x-split-reader/main/x-split-reader.user.js
 // ==/UserScript==
 
 (function () {

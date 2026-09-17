@@ -1,8 +1,25 @@
 {
   "name": "x-split-reader",
   "version": "0.3.4",
-  "private": true,
-  "description": "Compact split reader for X with fixed-width timeline and adaptive detail pane",
+  "description": "Compact split reader for X/Twitter with fixed-width timeline, adaptive comment pane, and typography optimization",
+  "homepage": "https://github.com/epodak/x-split-reader",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/epodak/x-split-reader.git"
+  },
+  "bugs": {
+    "url": "https://github.com/epodak/x-split-reader/issues"
+  },
+  "keywords": [
+    "twitter",
+    "x",
+    "userscript",
+    "tampermonkey",
+    "violentmonkey",
+    "split-reader",
+    "typography",
+    "reader"
+  ],
   "scripts": {
     "check": "node --check x-split-reader.user.js",
     "test": "node --test"
