@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Split Reader
 // @namespace    https://github.com/epodak/x-split-reader
-// @version      0.3.2
+// @version      0.3.3
 // @description  Compact split reader for X: fixed-width timeline plus adaptive post/replies pane.
 // @author       Feng Lu
 // @license      MIT
@@ -378,6 +378,77 @@
     return node;
   }
 
+  function compactTweetTextNode(root) {
+    if (!root) return;
+    if (typeof document === 'undefined' || typeof document.createTreeWalker !== 'function') return;
+    if (root.dataset && root.dataset.xsrParagraphs === 'true') return;
+
+    const filter = typeof NodeFilter !== 'undefined' ? NodeFilter.SHOW_TEXT : 4;
+    const walker = document.createTreeWalker(root, filter);
+    const nodes = [];
+    while (walker.nextNode()) {
+      nodes.push(walker.currentNode);
+    }
+
+    let modified = false;
+    for (const node of nodes) {
+      const val = node && node.nodeValue;
+      if (!val || !/\n[\s\u200b\u200c\u200d\uFEFF]*\n+/.test(val)) continue;
+
+      const parent = node.parentNode;
+      if (!parent) continue;
+
+      const parts = val.split(/\n[\s\u200b\u200c\u200d\uFEFF]*\n+/);
+      const frag = document.createDocumentFragment();
+      let hasPrecedingContent = false;
+
+      for (let i = 0; i < parts.length; i++) {
+        const part = parts[i];
+        if (!part) continue;
+
+        if (hasPrecedingContent) {
+          const spacer = document.createElement('span');
+          spacer.className = 'xsr-para-gap';
+          frag.appendChild(spacer);
+        }
+
+        frag.appendChild(document.createTextNode(part));
+        hasPrecedingContent = true;
+      }
+
+      if (hasPrecedingContent) {
+        parent.replaceChild(frag, node);
+        modified = true;
+      }
+    }
+
+    if (modified && root.dataset) {
+      root.dataset.xsrParagraphs = 'true';
+    }
+  }
+
+  function splitParagraphs(rawText) {
+    if (!rawText) return [];
+    return rawText
+      .split(/\n[\s\u200b\u200c\u200d\uFEFF]*\n+/)
+      .map((p) => p.trim())
+      .filter(Boolean);
+  }
+
+  function renderStructuredText(rawText) {
+    const container = element('div', 'xsr-text');
+    if (!rawText) return container;
+    const paragraphs = splitParagraphs(rawText);
+    if (paragraphs.length <= 1) {
+      container.textContent = rawText;
+      return container;
+    }
+    paragraphs.forEach((para) => {
+      container.appendChild(element('p', 'xsr-para', para));
+    });
+    return container;
+  }
+
   class DetailRenderer {
     constructor(onModeToggle, onLoadMore, onTimelineWidthChange, onTogglePost, showPost = false) {
       this.onModeToggle = onModeToggle;
@@ -594,7 +665,7 @@
       if (tweet.createdAt) date.title = new Date(tweet.createdAt).toLocaleString();
       identity.append(name, handle, dot, date);
       header.append(avatar, identity);
-      article.append(header, element('div', 'xsr-text', tweet.text || ''));
+      article.append(header, renderStructuredText(tweet.text || ''));
       if (tweet.media && tweet.media.length) {
         const media = element('div', `xsr-media count-${tweet.media.length}`);
         tweet.media.forEach((item) => {
@@ -663,7 +734,7 @@
       this.onScroll();
       [100, 300, 700, 1500, 3000].forEach((delay) => {
         setTimeout(() => {
-          this.applyArticleCompactStyle();
+          this.compactNativeTweets();
           if (this.enabled && !this.activeId) this.evaluate(true);
         }, delay);
       });
@@ -686,7 +757,7 @@
         if (!this.enabled || timer) return;
         timer = setTimeout(() => {
           timer = null;
-          this.applyArticleCompactStyle();
+          this.compactNativeTweets();
           if (!this.activeId || this.mode === 'FOLLOW') this.evaluate(false);
         }, 150);
       });
@@ -694,99 +765,12 @@
       if (target) this.observer.observe(target, { childList: true, subtree: true });
     }
 
-    applyArticleCompactStyle() {
+    compactNativeTweets() {
       if (!this.enabled) return;
-      const headings = document.querySelectorAll('h1, h2, [role="heading"], div[dir="ltr"] > span');
-      let hasArticleHeader = false;
-      for (const el of headings) {
-        const txt = el.textContent?.trim();
-        if (txt === 'Article' || txt === '文章') {
-          hasArticleHeader = true;
-          break;
-        }
-      }
-
-      const articleEl = document.querySelector('[data-testid*="rticle"], [data-testid*="Article"], [data-testid*="article"]');
-      if (!hasArticleHeader && !articleEl) return;
-
-      const container = articleEl || document.querySelector('[data-testid="primaryColumn"]') || document.querySelector('main[role="main"]');
-      if (!container) return;
-
-      if (!container.classList.contains('xsr-compact-article-scope')) {
-        container.classList.add('xsr-compact-article-scope');
-      }
-
-      // 1. 限制长文容器最大宽度为 680px，留出舒适的阅读呼吸列
-      if (articleEl) {
-        articleEl.style.setProperty('max-width', '680px', 'important');
-      }
-
-      // 2. 彻底折叠所有无实际文字内容的空行占位块 (Empty / BR-only Blocks)
-      // 推特 Lexical 渲染回车时生成的是独立的 min-height: 24px 的空段落容器
-      const allDivs = container.querySelectorAll('div[dir="auto"], div[dir="ltr"], div[class*="css-"], p');
-      allDivs.forEach((el) => {
-        if (el.closest('header[role="banner"], #xsr-pane, nav, [role="button"], button')) return;
-
-        const rawText = el.textContent || '';
-        const cleanText = rawText.replace(/[\s\u200b\u200c\u200d\uFEFF]/g, '');
-        const hasText = cleanText.length > 0;
-        const hasMedia = Boolean(el.querySelector('img, video, iframe, [data-testid*="media"], [data-testid*="tweet"]'));
-
-        // 空段落占位块：直接彻底隐藏 (display: none)，彻底消灭比文字还高的大空行！
-        if (!hasText && !hasMedia) {
-          if (el.querySelector('br') || el.innerHTML.includes('<br>') || (el.childElementCount <= 2 && el.clientHeight < 50)) {
-            el.style.setProperty('display', 'none', 'important');
-            return;
-          }
-        }
-
-        // 有文本内容的正常段落块：收紧下边距为 10px，清空上边距与内边距
-        if (hasText && el.matches('div[dir="auto"], div[dir="ltr"], p')) {
-          el.style.setProperty('margin-top', '0px', 'important');
-          el.style.setProperty('margin-bottom', '10px', 'important');
-          el.style.setProperty('padding-top', '0px', 'important');
-          el.style.setProperty('padding-bottom', '0px', 'important');
-
-          const parent = el.parentElement;
-          if (parent && parent !== container && !parent.closest('header[role="banner"], #xsr-pane')) {
-            parent.style.setProperty('margin-top', '0px', 'important');
-            parent.style.setProperty('margin-bottom', '0px', 'important');
-            parent.style.setProperty('padding-top', '0px', 'important');
-            parent.style.setProperty('padding-bottom', '0px', 'important');
-          }
-        }
-      });
-
-      // 连续 <br> 折叠为单换行
-      const brs = container.querySelectorAll('br + br');
-      brs.forEach((br) => {
-        br.style.setProperty('display', 'none', 'important');
-      });
-
-      // 3. 遍历文本叶子节点，强制字号 15px/1.58，标题 17px/1.35
-      const textNodes = container.querySelectorAll('span, div[dir="auto"], div[dir="ltr"]');
-      textNodes.forEach((node) => {
-        if (node.closest('header[role="banner"], #xsr-pane, nav, [role="button"], button')) return;
-        const text = node.textContent?.trim();
-        if (!text) return;
-
-        const isHeading = node.closest('h1, h2, h3, [role="heading"]') ||
-          node.tagName === 'STRONG' ||
-          node.closest('strong') ||
-          (text.length < 40 && (node.matches('[style*="font-size: 20"], [style*="font-size: 24"], [style*="font-size: 28"]') || node.matches('[class*="r-1b43r93"]')));
-
-        if (isHeading) {
-          node.style.setProperty('font-size', '17px', 'important');
-          node.style.setProperty('line-height', '1.35', 'important');
-          node.style.setProperty('font-weight', '700', 'important');
-          if (node.parentElement) {
-            node.parentElement.style.setProperty('margin-top', '14px', 'important');
-            node.parentElement.style.setProperty('margin-bottom', '6px', 'important');
-          }
-        } else if (node.childElementCount === 0) {
-          node.style.setProperty('font-size', '15px', 'important');
-          node.style.setProperty('line-height', '1.58', 'important');
-        }
+      const elements = document.querySelectorAll('[data-testid="tweetText"]');
+      elements.forEach((el) => {
+        if (el.closest('#xsr-pane')) return;
+        compactTweetTextNode(el);
       });
     }
 
@@ -848,6 +832,7 @@
 
     onScroll() {
       this.clearHoverTimer();
+      this.compactNativeTweets();
       if (!this.enabled || this.raf) return;
       this.raf = requestAnimationFrame(() => {
         this.raf = null;
@@ -1241,61 +1226,23 @@
         background: color-mix(in srgb, var(--xsr-accent) 5%, transparent);
       }
 
-      /* === 2.1 X 官方长文 (X Articles / Notes) 紧凑化排版优化 === */
-      html.xsr-enabled .xsr-compact-article-scope,
-      html.xsr-enabled [data-testid*="rticle"],
-      html.xsr-enabled [data-testid*="Article"],
-      html.xsr-enabled [data-testid*="article"] {
+      /* === 2.1 X 原生推文文本 Typography & 语义段落间距 === */
+      html.xsr-enabled article[data-testid="tweet"] [data-testid="tweetText"],
+      html.xsr-enabled [data-testid="tweetText"]:not(#xsr-pane *) {
         font-size: 15px !important;
         line-height: 1.58 !important;
-        max-width: 680px !important;
+        letter-spacing: -0.01em !important;
       }
-      html.xsr-enabled .xsr-compact-article-scope span,
-      html.xsr-enabled .xsr-compact-article-scope div[dir],
-      html.xsr-enabled [data-testid*="rticle"] span,
-      html.xsr-enabled [data-testid*="rticle"] div[dir],
-      html.xsr-enabled [data-testid*="Article"] span,
-      html.xsr-enabled [data-testid*="Article"] div[dir],
-      html.xsr-enabled [data-testid*="article"] span,
-      html.xsr-enabled [data-testid*="article"] div[dir] {
-        font-size: 15px !important;
-        line-height: 1.58 !important;
-      }
-      html.xsr-enabled .xsr-compact-article-scope [role="heading"] *,
-      html.xsr-enabled .xsr-compact-article-scope h1 *,
-      html.xsr-enabled .xsr-compact-article-scope h2 *,
-      html.xsr-enabled .xsr-compact-article-scope strong,
-      html.xsr-enabled .xsr-compact-article-scope strong *,
-      html.xsr-enabled [data-testid*="rticle"] [role="heading"] *,
-      html.xsr-enabled [data-testid*="rticle"] h1 *,
-      html.xsr-enabled [data-testid*="rticle"] h2 * {
-        font-size: 17px !important;
-        line-height: 1.35 !important;
-        font-weight: 700 !important;
-      }
-      html.xsr-enabled .xsr-compact-article-scope div[dir="auto"],
-      html.xsr-enabled [data-testid*="rticle"] div[dir="auto"],
-      html.xsr-enabled .xsr-compact-article-scope div[dir="ltr"],
-      html.xsr-enabled [data-testid*="rticle"] div[dir="ltr"],
-      html.xsr-enabled .xsr-compact-article-scope p,
-      html.xsr-enabled [data-testid*="rticle"] p {
-        margin-top: 0 !important;
-        margin-bottom: 8px !important;
-        padding-top: 0 !important;
-        padding-bottom: 0 !important;
-      }
-      html.xsr-enabled .xsr-compact-article-scope div:has(> br:only-child),
-      html.xsr-enabled [data-testid*="rticle"] div:has(> br:only-child) {
-        height: 6px !important;
-        min-height: 6px !important;
+      .xsr-para-gap {
+        display: block !important;
+        height: 8px !important;
+        min-height: 8px !important;
+        line-height: 0 !important;
+        font-size: 0 !important;
         margin: 0 !important;
         padding: 0 !important;
-      }
-      html.xsr-enabled .xsr-compact-article-scope blockquote,
-      html.xsr-enabled [data-testid*="rticle"] blockquote {
-        margin: 8px 0 !important;
-        padding: 4px 12px !important;
-        font-size: 14.5px !important;
+        user-select: none !important;
+        pointer-events: none !important;
       }
 
       /* === 3. 右侧 Detail 分栏 (#xsr-pane) === */
@@ -1508,12 +1455,18 @@
         font-size: 15px;
         line-height: 1.58;
         letter-spacing: -0.01em;
-        white-space: pre-wrap;
         overflow-wrap: anywhere;
       }
       .xsr-tweet.is-prominent .xsr-text {
         font-size: 16px;
         line-height: 1.6;
+      }
+      .xsr-para {
+        margin: 0 0 8px 0;
+        white-space: pre-wrap;
+      }
+      .xsr-para:last-child {
+        margin-bottom: 0;
       }
       .xsr-media {
         display: grid;
@@ -1583,6 +1536,9 @@
     extractTweetIdFromHref,
     formatMetric,
     formatTweetDate,
+    compactTweetTextNode,
+    splitParagraphs,
+    renderStructuredText,
     normalizeFxStatus,
     normalizeFxConversation
   };
@@ -1593,7 +1549,7 @@
     installCompactViewportSpoof();
     const bootstrap = () => {
       if (window.top !== window.self) return;
-      console.log('%c[X Split Reader] v0.3.1 Active%c (Typography & Article Compact Ready)', 'color: #1d9bf0; font-weight: bold;', 'color: gray;');
+      console.log('%c[X Split Reader] v0.3.3 Active%c (Paragraph Normalizer & Compact Text Ready)', 'color: #1d9bf0; font-weight: bold;', 'color: gray;');
       const app = new XSplitReader();
       app.start();
       window.__XSplitReader = app;

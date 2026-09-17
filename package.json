@@ -1,6 +1,6 @@
 {
   "name": "x-split-reader",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "private": true,
   "description": "Compact split reader for X with fixed-width timeline and adaptive detail pane",
   "scripts": {

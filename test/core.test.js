@@ -9,6 +9,9 @@ const {
   extractTweetIdFromHref,
   formatMetric,
   formatTweetDate,
+  compactTweetTextNode,
+  splitParagraphs,
+  renderStructuredText,
   normalizeFxConversation
 } = require('../x-split-reader.user.js');
 
@@ -78,5 +81,127 @@ test('small helpers clamp and format values', () => {
   assert.equal(formatTweetDate(threeDaysAgo), '3d');
   assert.equal(formatTweetDate(''), '');
   assert.equal(formatTweetDate('invalid-date'), '');
+});
+
+test('splitParagraphs recognizes multi-newline breaks and trims blank blocks', () => {
+  const raw = 'Paragraph 1\n\nParagraph 2\n \n\nParagraph 3\n\u200b\nParagraph 4';
+  const result = splitParagraphs(raw);
+  assert.deepEqual(result, ['Paragraph 1', 'Paragraph 2', 'Paragraph 3', 'Paragraph 4']);
+  assert.deepEqual(splitParagraphs(''), []);
+  assert.deepEqual(splitParagraphs('Single line'), ['Single line']);
+});
+
+test('compactTweetTextNode injects 8px paragraph gap between semantic paragraphs', () => {
+  const textNode1 = {
+    nodeValue: 'First paragraph.\n\n\nSecond paragraph.',
+    parentNode: null
+  };
+  const parent1 = {
+    children: [textNode1],
+    replaceChild(frag, oldNode) {
+      const idx = this.children.indexOf(oldNode);
+      if (idx !== -1) {
+        this.children.splice(idx, 1, ...frag.children);
+      }
+    }
+  };
+  textNode1.parentNode = parent1;
+
+  const textNode2 = {
+    nodeValue: 'Single line text without empty lines.',
+    parentNode: {
+      replaceChild() {
+        assert.fail('Should not replace single line node');
+      }
+    }
+  };
+
+  const fakeNodes = [textNode1, textNode2];
+  let index = 0;
+  const fakeWalker = {
+    nextNode() {
+      if (index < fakeNodes.length) {
+        this.currentNode = fakeNodes[index++];
+        return true;
+      }
+      return false;
+    },
+    currentNode: null
+  };
+
+  const origDocument = global.document;
+  const origNodeFilter = global.NodeFilter;
+
+  global.document = {
+    createTreeWalker: () => fakeWalker,
+    createDocumentFragment: () => ({
+      children: [],
+      appendChild(child) {
+        this.children.push(child);
+      }
+    }),
+    createElement: (tag) => ({
+      tag,
+      className: '',
+      style: {}
+    }),
+    createTextNode: (text) => ({
+      nodeValue: text
+    })
+  };
+  global.NodeFilter = { SHOW_TEXT: 4 };
+
+  try {
+    const root = { dataset: {} };
+    compactTweetTextNode(root);
+    assert.equal(parent1.children.length, 3);
+    assert.equal(parent1.children[0].nodeValue, 'First paragraph.');
+    assert.equal(parent1.children[1].className, 'xsr-para-gap');
+    assert.equal(parent1.children[2].nodeValue, 'Second paragraph.');
+    assert.equal(root.dataset.xsrParagraphs, 'true');
+  } finally {
+    global.document = origDocument;
+    global.NodeFilter = origNodeFilter;
+  }
+});
+
+test('renderStructuredText renders semantic paragraph elements when multiple paragraphs exist', () => {
+  const createdElements = [];
+  const fakeElement = (tag) => {
+    const el = {
+      tag,
+      className: '',
+      children: [],
+      textContent: '',
+      appendChild(child) {
+        this.children.push(child);
+      }
+    };
+    createdElements.push(el);
+    return el;
+  };
+
+  const origDocument = global.document;
+  global.document = {
+    createElement: fakeElement
+  };
+
+  try {
+    const rawMulti = 'Intro\n\nBody block\n\nOutro';
+    const container = renderStructuredText(rawMulti);
+    assert.equal(container.tag, 'div');
+    assert.equal(container.className, 'xsr-text');
+    assert.equal(container.children.length, 3);
+    assert.equal(container.children[0].className, 'xsr-para');
+    assert.equal(container.children[0].textContent, 'Intro');
+    assert.equal(container.children[1].textContent, 'Body block');
+    assert.equal(container.children[2].textContent, 'Outro');
+
+    const single = renderStructuredText('Just one line');
+    assert.equal(single.children.length, 0);
+    assert.equal(single.textContent, 'Just one line');
+  } finally {
+    global.document = origDocument;
+  }
 });
 

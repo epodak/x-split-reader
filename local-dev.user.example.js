@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Split Reader (Local Dev Example)
 // @namespace    https://github.com/epodak/x-split-reader
-// @version      0.3.0
+// @version      0.3.3
 // @description  Local development loader template for X Split Reader via Tampermonkey file:// protocol.
 // @match        https://x.com/*
 // @match        https://twitter.com/*
