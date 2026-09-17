@@ -44,6 +44,76 @@
     showPost: 'xsr.showPost'
   });
 
+  const getRealWindowWidth = (() => {
+    if (typeof window === 'undefined') return () => 1920;
+    try {
+      const desc = Object.getOwnPropertyDescriptor(window, 'innerWidth')
+        || Object.getOwnPropertyDescriptor(Object.getPrototypeOf(window), 'innerWidth');
+      if (desc && desc.get) {
+        const getter = desc.get;
+        return () => {
+          try { return getter.call(window); } catch (_) { return window.outerWidth || 1920; }
+        };
+      }
+    } catch (_) {}
+    return () => window.outerWidth || window.innerWidth || 1920;
+  })();
+
+  function installCompactViewportSpoof() {
+    if (typeof window === 'undefined') return;
+    const SPOOFED_COMPACT_WIDTH = 1180;
+    let spoofActive = true;
+
+    function applySpoof() {
+      const real = getRealWindowWidth();
+      const target = (spoofActive && real >= 1280) ? SPOOFED_COMPACT_WIDTH : real;
+      if (window.innerWidth === target && document.documentElement?.clientWidth === target) return;
+
+      try {
+        window.__defineGetter__('innerWidth', () => target);
+        if (document.documentElement) {
+          document.documentElement.__defineGetter__('clientWidth', () => target);
+        }
+        if (window.visualViewport) {
+          window.visualViewport.__defineGetter__('width', () => target);
+        }
+        window.dispatchEvent(new Event('resize'));
+        if (window.visualViewport) {
+          window.visualViewport.dispatchEvent(new Event('resize'));
+        }
+      } catch (_) {}
+    }
+
+    function checkMediaModal() {
+      const isModal = /\/status\/\d+\/(photo|video)\/\d+/.test(location.pathname);
+      spoofActive = !isModal;
+      applySpoof();
+    }
+
+    try {
+      applySpoof();
+      window.addEventListener('load', applySpoof, { passive: true });
+      window.addEventListener('resize', applySpoof, { passive: true });
+      document.addEventListener('visibilitychange', applySpoof, { passive: true });
+      window.addEventListener('popstate', checkMediaModal, { passive: true });
+
+      const origPushState = history.pushState;
+      if (typeof origPushState === 'function') {
+        history.pushState = function (...args) {
+          origPushState.apply(this, args);
+          checkMediaModal();
+        };
+      }
+      const origReplaceState = history.replaceState;
+      if (typeof origReplaceState === 'function') {
+        history.replaceState = function (...args) {
+          origReplaceState.apply(this, args);
+          checkMediaModal();
+        };
+      }
+    } catch (_) {}
+  }
+
   function clamp(value, min, max) {
     return Math.min(max, Math.max(min, value));
   }
@@ -344,7 +414,7 @@
       });
       divider.addEventListener('pointermove', (event) => {
         if (!divider.hasPointerCapture(event.pointerId)) return;
-        const maxAvailable = Math.max(CONFIG.minTimelineWidthPx + 100, (window.innerWidth || 1920) - CONFIG.navWidthPx - 340);
+        const maxAvailable = Math.max(CONFIG.minTimelineWidthPx + 100, getRealWindowWidth() - CONFIG.navWidthPx - 340);
         const maxLimit = Math.min(CONFIG.maxTimelineWidthPx, maxAvailable);
         const width = clamp(event.clientX - CONFIG.navWidthPx, CONFIG.minTimelineWidthPx, maxLimit);
         this.onTimelineWidthChange(width, true);
@@ -608,7 +678,7 @@
     }
 
     setTimelineWidth(width, persist = true) {
-      const maxAvailable = Math.max(CONFIG.minTimelineWidthPx + 100, (window.innerWidth || 1920) - CONFIG.navWidthPx - 340);
+      const maxAvailable = Math.max(CONFIG.minTimelineWidthPx + 100, getRealWindowWidth() - CONFIG.navWidthPx - 340);
       const maxLimit = Math.min(CONFIG.maxTimelineWidthPx, maxAvailable);
       const value = clamp(Number(width) || CONFIG.timelineWidthPx, CONFIG.minTimelineWidthPx, maxLimit);
       document.documentElement.style.setProperty('--xsr-timeline-width', `${Math.round(value)}px`);
@@ -839,12 +909,38 @@
         align-items: center !important;
         justify-content: center !important;
       }
-      html.xsr-enabled header[role="banner"] nav[role="navigation"] a span,
-      html.xsr-enabled header[role="banner"] nav[role="navigation"] a div[dir="ltr"] {
+      /* 导航图标与菜单项（含 a 链接和 More 等 div[role="button"]）：居中 44px 圆形，彻底隐藏文本 */
+      html.xsr-enabled header[role="banner"] nav[role="navigation"] a,
+      html.xsr-enabled header[role="banner"] nav[role="navigation"] [role="button"],
+      html.xsr-enabled header[role="banner"] [data-testid="AppTabBar_More_Menu"] {
+        width: 44px !important;
+        height: 44px !important;
+        margin: 2px auto !important;
+        padding: 0 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        border-radius: 9999px !important;
+      }
+      html.xsr-enabled header[role="banner"] nav[role="navigation"] a > div,
+      html.xsr-enabled header[role="banner"] nav[role="navigation"] [role="button"] > div {
+        min-width: 0 !important;
+        width: 44px !important;
+        height: 44px !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+      }
+      html.xsr-enabled header[role="banner"] nav[role="navigation"] span,
+      html.xsr-enabled header[role="banner"] nav[role="navigation"] div[dir="ltr"],
+      html.xsr-enabled header[role="banner"] [data-testid="AppTabBar_More_Menu"] span,
+      html.xsr-enabled header[role="banner"] [data-testid="AppTabBar_More_Menu"] div[dir="ltr"] {
         display: none !important;
       }
 
-      /* 发推按钮：44px 紧凑圆形 */
+      /* 发推按钮：44px 紧凑圆形，隐藏 Post 单词，展示推特官方羽毛笔 SVG 图标 */
       html.xsr-enabled header[role="banner"] [data-testid="SideNav_NewTweet_Button"] {
         width: 44px !important;
         height: 44px !important;
@@ -859,15 +955,17 @@
         align-items: center !important;
         justify-content: center !important;
       }
+      html.xsr-enabled header[role="banner"] [data-testid="SideNav_NewTweet_Button"] span,
+      html.xsr-enabled header[role="banner"] [data-testid="SideNav_NewTweet_Button"] div[dir="ltr"] {
+        display: none !important;
+      }
       html.xsr-enabled header[role="banner"] [data-testid="SideNav_NewTweet_Button"] svg {
         display: block !important;
-      }
-      html.xsr-enabled header[role="banner"] [data-testid="SideNav_NewTweet_Button"] span {
-        font-size: 13px !important;
-        font-weight: 700 !important;
+        width: 24px !important;
+        height: 24px !important;
       }
 
-      /* 最底部账号卡片：纯净圆形头像，消除文字截断与错位 */
+      /* 最底部账号卡片：纯净圆形头像，消除文字截断、多余边框与错位 */
       html.xsr-enabled header[role="banner"] [data-testid="SideNav_AccountSwitcher_Button"] {
         width: 44px !important;
         height: 44px !important;
@@ -879,14 +977,17 @@
         display: flex !important;
         align-items: center !important;
         justify-content: center !important;
+        border: none !important;
+        background: transparent !important;
       }
+      html.xsr-enabled header[role="banner"] [data-testid="SideNav_AccountSwitcher_Button"] span,
       html.xsr-enabled header[role="banner"] [data-testid="SideNav_AccountSwitcher_Button"] div[dir="ltr"],
       html.xsr-enabled header[role="banner"] [data-testid="SideNav_AccountSwitcher_Button"] svg {
         display: none !important;
       }
       html.xsr-enabled header[role="banner"] [data-testid="SideNav_AccountSwitcher_Button"] img {
-        width: 38px !important;
-        height: 38px !important;
+        width: 40px !important;
+        height: 40px !important;
         border-radius: 9999px !important;
       }
 
@@ -1126,6 +1227,7 @@
   if (typeof module !== 'undefined' && module.exports) module.exports = coreExports;
 
   if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+    installCompactViewportSpoof();
     const bootstrap = () => {
       if (window.top !== window.self) return;
       const app = new XSplitReader();
