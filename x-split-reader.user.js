@@ -721,37 +721,46 @@
         articleEl.style.setProperty('max-width', '680px', 'important');
       }
 
-      // 2. 遍历长文段落与块级容器，强制收敛段落间距，压缩作者敲出来的连续空白行
-      const blocks = container.querySelectorAll('div[dir="auto"], div[dir="ltr"], p');
-      blocks.forEach((block) => {
-        if (block.closest('header[role="banner"], #xsr-pane, nav, [role="button"], button')) return;
+      // 2. 彻底折叠所有无实际文字内容的空行占位块 (Empty / BR-only Blocks)
+      // 推特 Lexical 渲染回车时生成的是独立的 min-height: 24px 的空段落容器
+      const allDivs = container.querySelectorAll('div[dir="auto"], div[dir="ltr"], div[class*="css-"], p');
+      allDivs.forEach((el) => {
+        if (el.closest('header[role="banner"], #xsr-pane, nav, [role="button"], button')) return;
 
-        const text = block.textContent?.trim();
-        // 空行处理：如果只有 <br> 或没有文字，将高度压缩为 6px，消灭巨大空隙
-        if (!text || block.innerHTML === '<br>' || block.querySelector('br:only-child')) {
-          block.style.setProperty('height', '6px', 'important');
-          block.style.setProperty('min-height', '6px', 'important');
-          block.style.setProperty('margin-top', '0px', 'important');
-          block.style.setProperty('margin-bottom', '2px', 'important');
-          block.style.setProperty('padding-top', '0px', 'important');
-          block.style.setProperty('padding-bottom', '0px', 'important');
-          return;
+        const rawText = el.textContent || '';
+        const cleanText = rawText.replace(/[\s\u200b\u200c\u200d\uFEFF]/g, '');
+        const hasText = cleanText.length > 0;
+        const hasMedia = Boolean(el.querySelector('img, video, iframe, [data-testid*="media"], [data-testid*="tweet"]'));
+
+        // 空段落占位块：直接彻底隐藏 (display: none)，彻底消灭比文字还高的大空行！
+        if (!hasText && !hasMedia) {
+          if (el.querySelector('br') || el.innerHTML.includes('<br>') || (el.childElementCount <= 2 && el.clientHeight < 50)) {
+            el.style.setProperty('display', 'none', 'important');
+            return;
+          }
         }
 
-        // 正常段落块：收紧下边距为 8px，清除多余内边距
-        block.style.setProperty('margin-top', '0px', 'important');
-        block.style.setProperty('margin-bottom', '8px', 'important');
-        block.style.setProperty('padding-top', '0px', 'important');
-        block.style.setProperty('padding-bottom', '0px', 'important');
+        // 有文本内容的正常段落块：收紧下边距为 10px，清空上边距与内边距
+        if (hasText && el.matches('div[dir="auto"], div[dir="ltr"], p')) {
+          el.style.setProperty('margin-top', '0px', 'important');
+          el.style.setProperty('margin-bottom', '10px', 'important');
+          el.style.setProperty('padding-top', '0px', 'important');
+          el.style.setProperty('padding-bottom', '0px', 'important');
 
-        // 段落外层的父级 div 也常带有推特原子类的巨大间距，一并收敛
-        const parent = block.parentElement;
-        if (parent && parent !== container && !parent.closest('header[role="banner"], #xsr-pane')) {
-          parent.style.setProperty('margin-top', '0px', 'important');
-          parent.style.setProperty('margin-bottom', '0px', 'important');
-          parent.style.setProperty('padding-top', '0px', 'important');
-          parent.style.setProperty('padding-bottom', '0px', 'important');
+          const parent = el.parentElement;
+          if (parent && parent !== container && !parent.closest('header[role="banner"], #xsr-pane')) {
+            parent.style.setProperty('margin-top', '0px', 'important');
+            parent.style.setProperty('margin-bottom', '0px', 'important');
+            parent.style.setProperty('padding-top', '0px', 'important');
+            parent.style.setProperty('padding-bottom', '0px', 'important');
+          }
         }
+      });
+
+      // 连续 <br> 折叠为单换行
+      const brs = container.querySelectorAll('br + br');
+      brs.forEach((br) => {
+        br.style.setProperty('display', 'none', 'important');
       });
 
       // 3. 遍历文本叶子节点，强制字号 15px/1.58，标题 17px/1.35
