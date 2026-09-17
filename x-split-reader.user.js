@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         X Split Reader
 // @namespace    https://github.com/epodak/x-split-reader
-// @version      0.2.0
+// @version      0.3.0
 // @description  Compact split reader for X: fixed-width timeline plus adaptive post/replies pane.
 // @author       Feng Lu
 // @license      MIT
@@ -28,10 +28,10 @@
     fetchConcurrency: 2,
     cacheMaxEntries: 25,
     cacheTtlMs: 10 * 60 * 1000,
-    navWidthPx: 72,
-    timelineWidthPx: 620,
-    minTimelineWidthPx: 560,
-    maxTimelineWidthPx: 720,
+    navWidthPx: 68,
+    timelineWidthPx: 680,
+    minTimelineWidthPx: 480,
+    maxTimelineWidthPx: 1400,
     wideDetailThresholdPx: 780,
     apiTimeoutMs: 8000,
     scanIntervalMs: 120
@@ -40,7 +40,8 @@
   const STORAGE = Object.freeze({
     enabled: 'xsr.enabled',
     timelineWidth: 'xsr.timelineWidth',
-    mode: 'xsr.mode'
+    mode: 'xsr.mode',
+    showPost: 'xsr.showPost'
   });
 
   function clamp(value, min, max) {
@@ -70,6 +71,7 @@
   }
 
   function chooseActiveCandidate(items, readingY) {
+    if (!items || !items.length) return null;
     let winner = null;
     let bestDistance = Infinity;
     for (const item of items) {
@@ -82,7 +84,7 @@
         winner = { ...item, distance };
       }
     }
-    return winner;
+    return winner || items.find((item) => item.rect.bottom > 0 && item.rect.top < item.viewportHeight) || items[0] || null;
   }
 
   function mediaFromFx(status) {
@@ -285,14 +287,18 @@
   }
 
   class DetailRenderer {
-    constructor(onModeToggle, onLoadMore, onTimelineWidthChange) {
+    constructor(onModeToggle, onLoadMore, onTimelineWidthChange, onTogglePost, showPost = false) {
       this.onModeToggle = onModeToggle;
       this.onLoadMore = onLoadMore;
       this.onTimelineWidthChange = onTimelineWidthChange;
+      this.onTogglePost = onTogglePost;
+      this.showPost = showPost;
       this.currentId = null;
+      this.currentConversation = null;
       this.root = this.createRoot();
       this.body = this.root.querySelector('.xsr-body');
       this.modeButton = this.root.querySelector('.xsr-mode');
+      this.postButton = this.root.querySelector('.xsr-post-btn');
       this.openLink = this.root.querySelector('.xsr-open');
       this.status = this.root.querySelector('.xsr-status');
     }
@@ -306,9 +312,12 @@
       divider.setAttribute('role', 'separator');
       root.appendChild(divider);
       const toolbar = element('header', 'xsr-toolbar');
-      const title = element('strong', 'xsr-title', 'Post detail');
+      const title = element('strong', 'xsr-title', 'Comments');
       const status = element('span', 'xsr-status', 'Waiting for timeline…');
       const spacer = element('span', 'xsr-spacer');
+      const postBtn = element('button', `xsr-post-btn${this.showPost ? ' is-active' : ''}`, this.showPost ? 'Hide post' : 'Show post');
+      postBtn.type = 'button';
+      postBtn.addEventListener('click', () => this.onTogglePost());
       const mode = element('button', 'xsr-mode', 'FOLLOW');
       mode.type = 'button';
       mode.addEventListener('click', () => this.onModeToggle());
@@ -316,10 +325,10 @@
       open.target = '_blank';
       open.rel = 'noopener noreferrer';
       open.hidden = true;
-      toolbar.append(title, status, spacer, mode, open);
+      toolbar.append(title, status, spacer, postBtn, mode, open);
       const body = element('div', 'xsr-body');
       const empty = element('div', 'xsr-empty');
-      empty.append(element('div', 'xsr-empty-icon', '↕'), element('h2', '', 'Scroll the timeline'), element('p', '', 'The post crossing the reading line will appear here. Click FOLLOW to pin it.'));
+      empty.append(element('div', 'xsr-empty-icon', '💬'), element('h2', '', 'Scroll the timeline'), element('p', '', 'The comments crossing the reading line will appear here.'));
       body.appendChild(empty);
       root.append(toolbar, body);
       document.documentElement.appendChild(root);
@@ -335,7 +344,9 @@
       });
       divider.addEventListener('pointermove', (event) => {
         if (!divider.hasPointerCapture(event.pointerId)) return;
-        const width = clamp(event.clientX - CONFIG.navWidthPx, CONFIG.minTimelineWidthPx, CONFIG.maxTimelineWidthPx);
+        const maxAvailable = Math.max(CONFIG.minTimelineWidthPx + 100, (window.innerWidth || 1920) - CONFIG.navWidthPx - 340);
+        const maxLimit = Math.min(CONFIG.maxTimelineWidthPx, maxAvailable);
+        const width = clamp(event.clientX - CONFIG.navWidthPx, CONFIG.minTimelineWidthPx, maxLimit);
         this.onTimelineWidthChange(width, true);
       });
       const finish = (event) => {
@@ -353,43 +364,92 @@
       this.modeButton.title = mode === 'PINNED' ? 'Click or press Esc to resume auto-follow' : 'Click to pin current post';
     }
 
+    setShowPost(showPost) {
+      this.showPost = Boolean(showPost);
+      if (this.postButton) {
+        this.postButton.textContent = this.showPost ? 'Hide post' : 'Show post';
+        this.postButton.classList.toggle('is-active', this.showPost);
+      }
+      if (this.currentConversation) {
+        this.renderConversation(this.currentConversation);
+      }
+    }
+
+    renderMiniAnchor(tweet, threadCount = 0) {
+      const anchor = element('div', 'xsr-mini-anchor');
+      const avatar = element('img', 'xsr-mini-avatar');
+      avatar.src = tweet.author?.avatar || tweet.authorAvatar || '';
+      avatar.alt = '';
+      const info = element('div', 'xsr-mini-info');
+      const name = tweet.author?.name || tweet.authorName || 'Post';
+      const handle = tweet.author?.handle || tweet.authorHandle || '';
+      info.textContent = `${name} (${handle})`;
+      const action = element('button', 'xsr-mini-action', threadCount > 1 ? `View thread (${threadCount})` : 'Show post');
+      action.type = 'button';
+      action.addEventListener('click', () => this.onTogglePost());
+      anchor.append(avatar, info, action);
+      return anchor;
+    }
+
     setLoading(tweet) {
       this.currentId = tweet.id;
+      this.currentConversation = null;
       this.status.textContent = 'Loading replies…';
       this.openLink.href = tweet.url;
       this.openLink.hidden = false;
-      const shell = this.makeGrid();
-      shell.focus.appendChild(this.renderTweet(tweet, true));
+      const shell = this.makeGrid(this.showPost);
+      if (this.showPost) {
+        shell.focus?.appendChild(this.renderTweet(tweet, true));
+      } else {
+        shell.replies.appendChild(this.renderMiniAnchor(tweet));
+      }
       shell.replies.appendChild(this.renderSkeleton());
       this.body.replaceChildren(shell.grid);
       this.body.scrollTop = 0;
     }
 
-    makeGrid() {
-      const grid = element('div', 'xsr-detail-grid');
-      const focus = element('div', 'xsr-focus-column');
+    makeGrid(hasThread = false) {
+      const grid = element('div', `xsr-detail-grid${hasThread ? ' is-thread-layout' : ' is-comment-layout'}`);
+      const focus = hasThread ? element('div', 'xsr-focus-column') : null;
       const replies = element('div', 'xsr-reply-column');
-      grid.append(focus, replies);
+      if (focus) grid.appendChild(focus);
+      grid.appendChild(replies);
       return { grid, focus, replies };
     }
 
     renderConversation(conversation) {
       if (conversation.id !== this.currentId) return;
-      this.status.textContent = conversation.replies.length ? `${conversation.replies.length} replies loaded` : 'No replies returned';
-      const shell = this.makeGrid();
-      shell.focus.appendChild(this.renderTweet(conversation.status, true));
+      this.currentConversation = conversation;
+      const hasThread = Boolean(conversation.thread && conversation.thread.length > 1);
+      if (this.postButton) {
+        if (hasThread && !this.showPost) {
+          this.postButton.textContent = `Show thread (${conversation.thread.length})`;
+          this.postButton.classList.add('has-thread-hint');
+        } else {
+          this.postButton.textContent = this.showPost ? 'Hide post' : 'Show post';
+          this.postButton.classList.remove('has-thread-hint');
+        }
+      }
+      this.status.textContent = conversation.replies.length ? `${conversation.replies.length} replies` : 'No replies';
 
-      if (conversation.thread.length > 1) {
-        const thread = element('section', 'xsr-section');
-        thread.appendChild(element('h3', 'xsr-section-title', 'Thread'));
-        conversation.thread.filter((tweet) => tweet.id !== conversation.id).forEach((tweet) => thread.appendChild(this.renderTweet(tweet, false)));
-        shell.focus.appendChild(thread);
+      const showFocus = this.showPost;
+      const shell = this.makeGrid(showFocus);
+
+      if (showFocus) {
+        shell.focus.appendChild(this.renderTweet(conversation.status, true));
+        if (hasThread) {
+          const thread = element('section', 'xsr-section');
+          thread.appendChild(element('h3', 'xsr-section-title', 'Thread'));
+          conversation.thread.filter((tweet) => tweet.id !== conversation.id).forEach((tweet) => thread.appendChild(this.renderTweet(tweet, false)));
+          shell.focus.appendChild(thread);
+        }
+      } else {
+        shell.replies.appendChild(this.renderMiniAnchor(conversation.status, hasThread ? conversation.thread.length : 0));
       }
 
       const replies = element('section', 'xsr-section xsr-replies');
-      replies.appendChild(element('h3', 'xsr-section-title', 'Replies'));
       if (!conversation.replies.length) {
-        replies.appendChild(element('p', 'xsr-muted', 'No reply data was returned by the provider.'));
+        replies.appendChild(element('p', 'xsr-muted xsr-no-replies', 'No replies to this post.'));
       } else {
         conversation.replies.forEach((reply) => replies.appendChild(this.renderTweet(reply, false)));
       }
@@ -415,8 +475,10 @@
     renderError(tweet, error) {
       if (tweet.id !== this.currentId) return;
       this.status.textContent = 'Replies unavailable';
-      const shell = this.makeGrid();
-      shell.focus.appendChild(this.renderTweet(tweet, true));
+      const shell = this.makeGrid(this.showPost);
+      if (this.showPost) {
+        shell.focus?.appendChild(this.renderTweet(tweet, true));
+      }
       const notice = element('div', 'xsr-error');
       notice.append(element('strong', '', 'Could not load replies'), element('p', '', error && error.message ? error.message : 'Unknown provider error'), element('p', 'xsr-muted', 'The timeline post remains available. Use “Open in X” for the native conversation.'));
       shell.replies.appendChild(notice);
@@ -468,6 +530,7 @@
     constructor() {
       this.enabled = localStorage.getItem(STORAGE.enabled) !== 'false';
       this.mode = localStorage.getItem(STORAGE.mode) === 'PINNED' ? 'PINNED' : 'FOLLOW';
+      this.showPost = localStorage.getItem(STORAGE.showPost) === 'true';
       this.activeId = null;
       this.activeDistance = Infinity;
       this.candidate = null;
@@ -494,12 +557,39 @@
       window.addEventListener('resize', this.onScroll, { passive: true });
       document.addEventListener('keydown', this.onKeyDown, true);
       document.addEventListener('click', this.onClick, true);
+      this.initObserver();
       this.onScroll();
+      [100, 300, 700, 1500, 3000].forEach((delay) => {
+        setTimeout(() => {
+          if (this.enabled && !this.activeId) this.evaluate(true);
+        }, delay);
+      });
       if (typeof GM_registerMenuCommand === 'function') {
         GM_registerMenuCommand('Toggle X Split Reader', () => this.setEnabled(!this.enabled));
         GM_registerMenuCommand('Resume auto-follow', () => this.setMode('FOLLOW'));
         GM_registerMenuCommand('Reset timeline width', () => this.setTimelineWidth(CONFIG.timelineWidthPx, false));
+        GM_registerMenuCommand('Toggle show original post', () => this.toggleShowPost());
       }
+    }
+
+    initObserver() {
+      if (this.observer) return;
+      let timer = null;
+      this.observer = new MutationObserver(() => {
+        if (!this.enabled || timer) return;
+        timer = setTimeout(() => {
+          timer = null;
+          if (!this.activeId || this.mode === 'FOLLOW') this.evaluate(false);
+        }, 150);
+      });
+      const target = document.body || document.documentElement;
+      if (target) this.observer.observe(target, { childList: true, subtree: true });
+    }
+
+    toggleShowPost() {
+      this.showPost = !this.showPost;
+      localStorage.setItem(STORAGE.showPost, String(this.showPost));
+      this.renderer?.setShowPost(this.showPost);
     }
 
     ensureRenderer() {
@@ -507,15 +597,20 @@
         this.renderer = new DetailRenderer(
           () => this.setMode(this.mode === 'FOLLOW' ? 'PINNED' : 'FOLLOW'),
           (id, cursor) => this.loadMore(id, cursor),
-          (width, persist) => this.setTimelineWidth(width, persist)
+          (width, persist) => this.setTimelineWidth(width, persist),
+          () => this.toggleShowPost(),
+          this.showPost
         );
         this.renderer.setMode(this.mode);
+        this.renderer.setShowPost(this.showPost);
       }
       return this.renderer;
     }
 
     setTimelineWidth(width, persist = true) {
-      const value = clamp(Number(width) || CONFIG.timelineWidthPx, CONFIG.minTimelineWidthPx, CONFIG.maxTimelineWidthPx);
+      const maxAvailable = Math.max(CONFIG.minTimelineWidthPx + 100, (window.innerWidth || 1920) - CONFIG.navWidthPx - 340);
+      const maxLimit = Math.min(CONFIG.maxTimelineWidthPx, maxAvailable);
+      const value = clamp(Number(width) || CONFIG.timelineWidthPx, CONFIG.minTimelineWidthPx, maxLimit);
       document.documentElement.style.setProperty('--xsr-timeline-width', `${Math.round(value)}px`);
       if (persist) localStorage.setItem(STORAGE.timelineWidth, String(Math.round(value)));
       else localStorage.removeItem(STORAGE.timelineWidth);
@@ -639,14 +734,22 @@
     onClick(event) {
       if (!this.enabled || event.defaultPrevented || event.button !== 0) return;
       if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
-      const link = event.target.closest?.('a[href*="/status/"]');
-      if (!link || !link.querySelector('time')) return;
-      const article = link.closest('article[data-testid="tweet"]');
+      if (event.target.closest('#xsr-pane')) return;
+
+      const article = event.target.closest('article[data-testid="tweet"]');
       if (!article) return;
+
+      // 允许作者头像、点赞、转推、媒体查看等原生交互
+      const interactive = event.target.closest(
+        'button, [role="button"], input, textarea, a[href*="/status/photo/"], a[href*="/status/video/"]'
+      );
+      if (interactive && !interactive.querySelector('time') && !interactive.closest('[data-testid="tweetText"]')) {
+        return;
+      }
+
       const tweet = extractDomTweet(article);
       if (!tweet) return;
-      event.preventDefault();
-      event.stopPropagation();
+
       const rect = article.getBoundingClientRect();
       this.activate({ id: tweet.id, article, tweet, rect: { top: rect.top, bottom: rect.bottom, height: rect.height }, viewportHeight: window.innerHeight, distance: 0 });
     }
@@ -657,96 +760,346 @@
       :root {
         --xsr-nav-width: ${CONFIG.navWidthPx}px;
         --xsr-timeline-width: ${CONFIG.timelineWidthPx}px;
+        --xsr-timeline-gap: 14px;
         --xsr-detail-wide-threshold: ${CONFIG.wideDetailThresholdPx}px;
         --xsr-border: rgb(239, 243, 244);
         --xsr-bg: rgb(255, 255, 255);
         --xsr-text: rgb(15, 20, 25);
         --xsr-muted: rgb(83, 100, 113);
         --xsr-accent: rgb(29, 155, 240);
+        --xsr-btn-hover: rgba(15, 20, 25, 0.08);
       }
       @media (prefers-color-scheme: dark) {
-        :root { --xsr-border: rgb(47, 51, 54); --xsr-bg: rgb(0, 0, 0); --xsr-text: rgb(231, 233, 234); --xsr-muted: rgb(113, 118, 123); }
+        :root {
+          --xsr-border: rgb(47, 51, 54);
+          --xsr-bg: rgb(0, 0, 0);
+          --xsr-text: rgb(231, 233, 234);
+          --xsr-muted: rgb(113, 118, 123);
+          --xsr-btn-hover: rgba(231, 233, 234, 0.12);
+        }
       }
       #xsr-pane { display: none; }
-      html.xsr-enabled body { padding-right: 0 !important; }
+
+      /* === 彻底治愈推特原生无限滚动 (严禁污染 html/body 的 overflow-x 与 padding-right) === */
+
+      /* 隐藏原生右侧边栏（趋势、搜索） */
       html.xsr-enabled [data-testid="sidebarColumn"] { display: none !important; }
-      html.xsr-enabled header[role="banner"], html.xsr-enabled header[role="banner"] > div { width: var(--xsr-nav-width) !important; }
-      html.xsr-enabled header[role="banner"] { overflow: hidden !important; }
-      html.xsr-enabled header[role="banner"] nav[role="navigation"] a { width: 48px !important; }
-      html.xsr-enabled header[role="banner"] nav[role="navigation"] a > div { min-width: 48px !important; }
-      html.xsr-enabled header[role="banner"] nav[role="navigation"] a > div > div:last-child:not(:first-child) { display: none !important; }
-      html.xsr-enabled header[role="banner"] [data-testid="SideNav_NewTweet_Button"] { width: 48px !important; min-width: 48px !important; }
+
+      /* === 1. 左侧紧凑导航栏整治 (标准 68px 原生紧凑模式，消除错位与截断) === */
+      html.xsr-enabled header[role="banner"] {
+        position: fixed !important;
+        left: 0 !important;
+        top: 0 !important;
+        bottom: 0 !important;
+        width: var(--xsr-nav-width) !important;
+        min-width: var(--xsr-nav-width) !important;
+        max-width: var(--xsr-nav-width) !important;
+        flex-grow: 0 !important;
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: center !important;
+        border-right: 1px solid var(--xsr-border) !important;
+        z-index: 100 !important;
+        background: var(--xsr-bg) !important;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+        scrollbar-width: none !important;
+      }
+      html.xsr-enabled header[role="banner"]::-webkit-scrollbar { display: none !important; }
+
+      html.xsr-enabled header[role="banner"] > div,
+      html.xsr-enabled header[role="banner"] > div > div {
+        width: 100% !important;
+        max-width: var(--xsr-nav-width) !important;
+        align-items: center !important;
+      }
+
+      /* 导航图标：居中 44px 圆形，隐藏文本 */
+      html.xsr-enabled header[role="banner"] nav[role="navigation"] {
+        align-items: center !important;
+        width: 100% !important;
+      }
+      html.xsr-enabled header[role="banner"] nav[role="navigation"] a {
+        width: 44px !important;
+        height: 44px !important;
+        margin: 2px auto !important;
+        padding: 0 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        border-radius: 9999px !important;
+      }
+      html.xsr-enabled header[role="banner"] nav[role="navigation"] a > div {
+        min-width: 0 !important;
+        width: 44px !important;
+        height: 44px !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+      }
+      html.xsr-enabled header[role="banner"] nav[role="navigation"] a span,
+      html.xsr-enabled header[role="banner"] nav[role="navigation"] a div[dir="ltr"] {
+        display: none !important;
+      }
+
+      /* 发推按钮：44px 紧凑圆形 */
+      html.xsr-enabled header[role="banner"] [data-testid="SideNav_NewTweet_Button"] {
+        width: 44px !important;
+        height: 44px !important;
+        min-width: 44px !important;
+        max-width: 44px !important;
+        min-height: 44px !important;
+        max-height: 44px !important;
+        margin: 8px auto !important;
+        padding: 0 !important;
+        border-radius: 9999px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+      }
+      html.xsr-enabled header[role="banner"] [data-testid="SideNav_NewTweet_Button"] svg {
+        display: block !important;
+      }
+      html.xsr-enabled header[role="banner"] [data-testid="SideNav_NewTweet_Button"] span {
+        font-size: 13px !important;
+        font-weight: 700 !important;
+      }
+
+      /* 最底部账号卡片：纯净圆形头像，消除文字截断与错位 */
+      html.xsr-enabled header[role="banner"] [data-testid="SideNav_AccountSwitcher_Button"] {
+        width: 44px !important;
+        height: 44px !important;
+        min-width: 44px !important;
+        max-width: 44px !important;
+        margin: 12px auto !important;
+        padding: 0 !important;
+        border-radius: 9999px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+      }
+      html.xsr-enabled header[role="banner"] [data-testid="SideNav_AccountSwitcher_Button"] div[dir="ltr"],
+      html.xsr-enabled header[role="banner"] [data-testid="SideNav_AccountSwitcher_Button"] svg {
+        display: none !important;
+      }
+      html.xsr-enabled header[role="banner"] [data-testid="SideNav_AccountSwitcher_Button"] img {
+        width: 38px !important;
+        height: 38px !important;
+        border-radius: 9999px !important;
+      }
+
+      /* === 2. 主时间线 Timeline 容器设置 === */
+      html.xsr-enabled #react-root > div > div > div {
+        justify-content: flex-start !important;
+      }
       html.xsr-enabled main[role="main"] {
+        position: relative !important;
         width: var(--xsr-timeline-width) !important;
         min-width: var(--xsr-timeline-width) !important;
         max-width: var(--xsr-timeline-width) !important;
-        margin-left: var(--xsr-nav-width) !important;
+        flex-grow: 0 !important;
+        flex-shrink: 0 !important;
+        margin-left: calc(var(--xsr-nav-width) + var(--xsr-timeline-gap)) !important;
         margin-right: 0 !important;
       }
-      html.xsr-enabled [data-testid="primaryColumn"] { width: var(--xsr-timeline-width) !important; min-width: 0 !important; max-width: none !important; }
-      html.xsr-enabled article.xsr-active-tweet { box-shadow: inset 3px 0 0 var(--xsr-accent); background: color-mix(in srgb, var(--xsr-accent) 5%, transparent); }
+      html.xsr-enabled [data-testid="primaryColumn"] {
+        width: 100% !important;
+        min-width: 0 !important;
+        max-width: var(--xsr-timeline-width) !important;
+        border-right: 1px solid var(--xsr-border) !important;
+      }
+      html.xsr-enabled article.xsr-active-tweet {
+        box-shadow: inset 3px 0 0 var(--xsr-accent);
+        background: color-mix(in srgb, var(--xsr-accent) 5%, transparent);
+      }
+
+      /* === 3. 右侧 Detail 分栏 (#xsr-pane) === */
       html.xsr-enabled #xsr-pane {
-        display: flex; position: fixed; z-index: 999; top: 0; right: 0; bottom: 0;
-        left: calc(var(--xsr-nav-width) + var(--xsr-timeline-width));
-        width: auto; min-width: 0; height: 100vh; flex-direction: column;
-        color: var(--xsr-text); background: var(--xsr-bg); border-left: 1px solid var(--xsr-border);
+        display: flex;
+        position: fixed;
+        z-index: 999;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        width: calc(100vw - var(--xsr-nav-width) - var(--xsr-timeline-width) - var(--xsr-timeline-gap)) !important;
+        min-width: 0;
+        height: 100vh;
+        flex-direction: column;
+        color: var(--xsr-text);
+        background: var(--xsr-bg);
+        border-left: 1px solid var(--xsr-border);
         font-family: TwitterChirp, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       }
-      .xsr-divider { position: absolute; z-index: 3; left: -5px; top: 0; bottom: 0; width: 10px; cursor: col-resize; }
-      .xsr-divider:hover, html.xsr-resizing .xsr-divider { background: color-mix(in srgb, var(--xsr-accent) 30%, transparent); }
-      html.xsr-resizing { cursor: col-resize !important; user-select: none !important; }
-      .xsr-toolbar { display: flex; align-items: center; gap: 8px; min-height: 48px; padding: 0 12px; border-bottom: 1px solid var(--xsr-border); }
-      .xsr-title { font-size: 16px; white-space: nowrap; }
+      .xsr-divider {
+        position: absolute;
+        z-index: 10;
+        left: -5px;
+        top: 0;
+        bottom: 0;
+        width: 10px;
+        cursor: col-resize;
+      }
+      .xsr-divider:hover, html.xsr-resizing .xsr-divider {
+        background: color-mix(in srgb, var(--xsr-accent) 30%, transparent);
+      }
+      html.xsr-resizing {
+        cursor: col-resize !important;
+        user-select: none !important;
+      }
+
+      /* 工具栏 */
+      .xsr-toolbar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 48px;
+        padding: 0 12px;
+        border-bottom: 1px solid var(--xsr-border);
+      }
+      .xsr-title { font-size: 15px; font-weight: 700; white-space: nowrap; }
       .xsr-status { color: var(--xsr-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .xsr-spacer { flex: 1; }
-      .xsr-mode, .xsr-load-more { border: 1px solid var(--xsr-border); border-radius: 999px; padding: 5px 10px; color: var(--xsr-accent); background: transparent; font-weight: 700; cursor: pointer; }
-      .xsr-mode.is-pinned { color: white; border-color: var(--xsr-accent); background: var(--xsr-accent); }
-      .xsr-open { color: var(--xsr-accent); font-size: 12px; text-decoration: none; white-space: nowrap; }
+
+      /* 按钮组 */
+      .xsr-post-btn, .xsr-mode, .xsr-load-more {
+        border: 1px solid var(--xsr-border);
+        border-radius: 9999px;
+        padding: 4px 10px;
+        font-size: 12px;
+        font-weight: 700;
+        color: var(--xsr-text);
+        background: transparent;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      .xsr-post-btn:hover, .xsr-mode:hover, .xsr-load-more:hover {
+        background: var(--xsr-btn-hover);
+      }
+      .xsr-post-btn.is-active {
+        color: white;
+        background: var(--xsr-text);
+        border-color: var(--xsr-text);
+      }
+      .xsr-post-btn.has-thread-hint {
+        color: var(--xsr-accent);
+        border-color: var(--xsr-accent);
+        background: color-mix(in srgb, var(--xsr-accent) 10%, transparent);
+      }
+      .xsr-post-btn.has-thread-hint:hover {
+        background: color-mix(in srgb, var(--xsr-accent) 20%, transparent);
+      }
+      .xsr-mode.is-pinned {
+        color: white;
+        border-color: var(--xsr-accent);
+        background: var(--xsr-accent);
+      }
+      .xsr-open {
+        color: var(--xsr-accent);
+        font-size: 12px;
+        text-decoration: none;
+        white-space: nowrap;
+      }
+
+      /* 滚动主体与网格 */
       .xsr-body { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; }
       .xsr-detail-grid { min-height: 100%; display: grid; grid-template-columns: 1fr; align-items: start; }
       .xsr-focus-column, .xsr-reply-column { min-width: 0; }
-      .xsr-empty { display: grid; min-height: 70vh; place-content: center; padding: 24px; text-align: center; color: var(--xsr-muted); }
-      .xsr-empty-icon { font-size: 36px; color: var(--xsr-accent); }
-      .xsr-empty h2 { margin: 8px 0 4px; color: var(--xsr-text); }
-      .xsr-empty p { max-width: 360px; margin: 0; line-height: 1.45; }
+      .xsr-detail-grid.is-comment-layout .xsr-reply-column {
+        width: 100%;
+        max-width: 860px;
+        margin: 0 auto;
+      }
+
+      /* Mini Anchor：纯评论视图顶部的超轻量单行作者锚点 */
+      .xsr-mini-anchor {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 12px;
+        background: color-mix(in srgb, var(--xsr-text) 3%, var(--xsr-bg));
+        border-bottom: 1px solid var(--xsr-border);
+        font-size: 12px;
+      }
+      .xsr-mini-avatar {
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        object-fit: cover;
+        flex-shrink: 0;
+      }
+      .xsr-mini-info {
+        color: var(--xsr-muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        flex: 1;
+      }
+      .xsr-mini-action {
+        border: none;
+        background: transparent;
+        color: var(--xsr-accent);
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        padding: 2px 6px;
+        border-radius: 4px;
+        white-space: nowrap;
+      }
+      .xsr-mini-action:hover {
+        text-decoration: underline;
+        background: color-mix(in srgb, var(--xsr-accent) 10%, transparent);
+      }
+
+      /* 空状态与推文卡片 */
+      .xsr-empty { display: grid; min-height: 60vh; place-content: center; padding: 24px; text-align: center; color: var(--xsr-muted); }
+      .xsr-empty-icon { font-size: 32px; color: var(--xsr-accent); }
+      .xsr-empty h2 { margin: 8px 0 4px; font-size: 16px; color: var(--xsr-text); }
+      .xsr-empty p { max-width: 320px; margin: 0; font-size: 13px; line-height: 1.4; }
       .xsr-tweet { padding: 10px 12px; border-bottom: 1px solid var(--xsr-border); cursor: pointer; }
       .xsr-tweet:hover { background: color-mix(in srgb, var(--xsr-text) 3%, transparent); }
       .xsr-tweet.is-prominent { padding-top: 12px; }
       .xsr-tweet-header { display: flex; align-items: center; gap: 8px; }
-      .xsr-avatar { width: 38px; height: 38px; flex: 0 0 auto; border-radius: 50%; object-fit: cover; background: var(--xsr-border); }
+      .xsr-avatar { width: 36px; height: 36px; flex: 0 0 auto; border-radius: 50%; object-fit: cover; background: var(--xsr-border); }
       .xsr-identity { min-width: 0; display: flex; flex-direction: column; line-height: 1.2; }
       .xsr-identity strong, .xsr-identity span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .xsr-identity span, .xsr-date, .xsr-muted { color: var(--xsr-muted); }
+      .xsr-identity strong { font-size: 13px; }
+      .xsr-identity span, .xsr-date, .xsr-muted { color: var(--xsr-muted); font-size: 12px; }
       .xsr-date { margin-left: auto; font-size: 11px; white-space: nowrap; }
-      .xsr-text { margin-top: 8px; font-size: 14px; line-height: 1.38; white-space: pre-wrap; overflow-wrap: anywhere; }
-      .xsr-tweet.is-prominent .xsr-text { font-size: 16px; line-height: 1.42; }
-      .xsr-media { display: grid; grid-template-columns: repeat(2, 1fr); gap: 2px; max-height: 360px; margin-top: 8px; overflow: hidden; border: 1px solid var(--xsr-border); border-radius: 12px; }
+      .xsr-text { margin-top: 6px; font-size: 14px; line-height: 1.38; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .xsr-tweet.is-prominent .xsr-text { font-size: 15px; line-height: 1.42; }
+      .xsr-media { display: grid; grid-template-columns: repeat(2, 1fr); gap: 2px; max-height: 320px; margin-top: 8px; overflow: hidden; border: 1px solid var(--xsr-border); border-radius: 12px; }
       .xsr-media.count-1 { grid-template-columns: 1fr; }
-      .xsr-media img { width: 100%; height: 100%; min-height: 130px; max-height: 360px; object-fit: cover; }
-      .xsr-metrics { display: flex; justify-content: space-around; gap: 8px; margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--xsr-border); color: var(--xsr-muted); font-size: 12px; }
-      .xsr-section-title { position: sticky; z-index: 1; top: 0; margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--xsr-border); background: color-mix(in srgb, var(--xsr-bg) 94%, transparent); backdrop-filter: blur(8px); font-size: 13px; }
-      .xsr-section > .xsr-muted { padding: 8px 12px 14px; }
+      .xsr-media img { width: 100%; height: 100%; min-height: 120px; max-height: 320px; object-fit: cover; }
+      .xsr-metrics { display: flex; justify-content: space-around; gap: 8px; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--xsr-border); color: var(--xsr-muted); font-size: 11px; }
+      .xsr-section-title { position: sticky; z-index: 1; top: 0; margin: 0; padding: 6px 12px; border-bottom: 1px solid var(--xsr-border); background: color-mix(in srgb, var(--xsr-bg) 94%, transparent); backdrop-filter: blur(8px); font-size: 12px; font-weight: 700; }
+      .xsr-section > .xsr-muted { padding: 12px; }
+      .xsr-no-replies { text-align: center; padding: 24px !important; color: var(--xsr-muted); }
       .xsr-load-more { display: block; margin: 12px auto 20px; }
       .xsr-load-more:disabled { opacity: .6; cursor: wait; }
       .xsr-error { margin: 14px; padding: 14px; border: 1px solid color-mix(in srgb, #f4212e 55%, var(--xsr-border)); border-radius: 12px; }
       .xsr-error p { margin: 8px 0 0; }
-      .xsr-skeleton { padding: 14px 12px; }
-      .xsr-skeleton-line { height: 10px; width: 72%; margin: 10px 0; border-radius: 999px; background: var(--xsr-border); animation: xsr-pulse 1.2s ease-in-out infinite alternate; }
+      .xsr-skeleton { padding: 12px; }
+      .xsr-skeleton-line { height: 10px; width: 72%; margin: 8px 0; border-radius: 9999px; background: var(--xsr-border); animation: xsr-pulse 1.2s ease-in-out infinite alternate; }
       .xsr-skeleton-line.wide { width: 94%; } .xsr-skeleton-line.short { width: 48%; }
       @keyframes xsr-pulse { to { opacity: .45; } }
 
-      @media (min-width: 1550px) {
-        html.xsr-enabled #xsr-pane .xsr-detail-grid { grid-template-columns: minmax(320px, 0.86fr) minmax(380px, 1.14fr); }
-        html.xsr-enabled #xsr-pane .xsr-focus-column { position: sticky; top: 0; max-height: calc(100vh - 48px); overflow-y: auto; border-right: 1px solid var(--xsr-border); }
-        html.xsr-enabled #xsr-pane .xsr-reply-column { min-height: 100%; }
-        html.xsr-enabled #xsr-pane .xsr-focus-column .xsr-media { max-height: 320px; }
-        html.xsr-enabled #xsr-pane .xsr-focus-column .xsr-media img { max-height: 320px; }
+      /* 展开主帖 / Thread 时双列对照布局 */
+      @media (min-width: 1400px) {
+        html.xsr-enabled #xsr-pane .xsr-detail-grid.is-thread-layout { grid-template-columns: minmax(320px, 0.9fr) minmax(360px, 1.1fr); }
+        html.xsr-enabled #xsr-pane .xsr-detail-grid.is-thread-layout .xsr-focus-column { position: sticky; top: 0; max-height: calc(100vh - 48px); overflow-y: auto; border-right: 1px solid var(--xsr-border); }
+        html.xsr-enabled #xsr-pane .xsr-detail-grid.is-thread-layout .xsr-reply-column { min-height: 100%; }
+        html.xsr-enabled #xsr-pane .xsr-detail-grid.is-thread-layout .xsr-focus-column .xsr-media { max-height: 300px; }
+        html.xsr-enabled #xsr-pane .xsr-detail-grid.is-thread-layout .xsr-focus-column .xsr-media img { max-height: 300px; }
+        html.xsr-enabled #xsr-pane .xsr-detail-grid.is-comment-layout { grid-template-columns: 1fr; }
       }
 
-      @media (max-width: 1240px) {
-        :root { --xsr-nav-width: 64px; }
-        html.xsr-enabled main[role="main"] { width: min(600px, calc(100vw - var(--xsr-nav-width))) !important; min-width: min(600px, calc(100vw - var(--xsr-nav-width))) !important; max-width: min(600px, calc(100vw - var(--xsr-nav-width))) !important; }
-        html.xsr-enabled [data-testid="primaryColumn"] { width: 100% !important; }
+      /* 窄屏降级 */
+      @media (max-width: 1200px) {
+        :root { --xsr-nav-width: 64px; --xsr-timeline-gap: 0px; }
+        html.xsr-enabled main[role="main"] { margin-left: 0 !important; width: min(600px, calc(100vw - var(--xsr-nav-width))) !important; min-width: min(600px, calc(100vw - var(--xsr-nav-width))) !important; max-width: min(600px, calc(100vw - var(--xsr-nav-width))) !important; }
+        html.xsr-enabled [data-testid="primaryColumn"] { width: 100% !important; border-right: none !important; }
         html.xsr-enabled #xsr-pane { display: none; }
       }
     `;
