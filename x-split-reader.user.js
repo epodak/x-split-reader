@@ -34,14 +34,17 @@
     maxTimelineWidthPx: 1400,
     wideDetailThresholdPx: 780,
     apiTimeoutMs: 8000,
-    scanIntervalMs: 120
+    scanIntervalMs: 120,
+    hoverLookahead: true,
+    hoverDebounceMs: 110
   });
 
   const STORAGE = Object.freeze({
     enabled: 'xsr.enabled',
     timelineWidth: 'xsr.timelineWidth',
     mode: 'xsr.mode',
-    showPost: 'xsr.showPost'
+    showPost: 'xsr.showPost',
+    hoverLookahead: 'xsr.hoverLookahead'
   });
 
   const getRealWindowWidth = (() => {
@@ -601,8 +604,13 @@
       this.enabled = localStorage.getItem(STORAGE.enabled) !== 'false';
       this.mode = localStorage.getItem(STORAGE.mode) === 'PINNED' ? 'PINNED' : 'FOLLOW';
       this.showPost = localStorage.getItem(STORAGE.showPost) === 'true';
+      this.hoverLookahead = localStorage.getItem(STORAGE.hoverLookahead) !== 'false';
       this.activeId = null;
       this.activeDistance = Infinity;
+      this.scrollTriggeredArticle = null;
+      this.scrollTriggeredId = null;
+      this.hoverTimer = null;
+      this.hoverTimerArticle = null;
       this.candidate = null;
       this.candidateSince = 0;
       this.lastScanAt = 0;
@@ -617,6 +625,7 @@
       this.onScroll = this.onScroll.bind(this);
       this.onKeyDown = this.onKeyDown.bind(this);
       this.onClick = this.onClick.bind(this);
+      this.onPointerMove = this.onPointerMove.bind(this);
     }
 
     start() {
@@ -627,6 +636,7 @@
       window.addEventListener('resize', this.onScroll, { passive: true });
       document.addEventListener('keydown', this.onKeyDown, true);
       document.addEventListener('click', this.onClick, true);
+      document.addEventListener('pointermove', this.onPointerMove, { passive: true });
       this.initObserver();
       this.onScroll();
       [100, 300, 700, 1500, 3000].forEach((delay) => {
@@ -639,6 +649,10 @@
         GM_registerMenuCommand('Resume auto-follow', () => this.setMode('FOLLOW'));
         GM_registerMenuCommand('Reset timeline width', () => this.setTimelineWidth(CONFIG.timelineWidthPx, false));
         GM_registerMenuCommand('Toggle show original post', () => this.toggleShowPost());
+        GM_registerMenuCommand('Toggle downward hover lookahead', () => {
+          this.hoverLookahead = !this.hoverLookahead;
+          localStorage.setItem(STORAGE.hoverLookahead, String(this.hoverLookahead));
+        });
       }
     }
 
@@ -697,6 +711,7 @@
     }
 
     setEnabled(enabled) {
+      this.clearHoverTimer();
       this.enabled = Boolean(enabled);
       localStorage.setItem(STORAGE.enabled, String(this.enabled));
       this.applyEnabled();
@@ -704,6 +719,7 @@
     }
 
     setMode(mode) {
+      this.clearHoverTimer();
       this.mode = mode;
       localStorage.setItem(STORAGE.mode, mode);
       this.renderer?.setMode(mode);
@@ -711,6 +727,7 @@
     }
 
     onScroll() {
+      this.clearHoverTimer();
       if (!this.enabled || this.raf) return;
       this.raf = requestAnimationFrame(() => {
         this.raf = null;
@@ -728,6 +745,8 @@
       const winner = chooseActiveCandidate(items, window.innerHeight * CONFIG.readingLineRatio);
       if (!winner) return;
       if (winner.id === this.activeId) {
+        this.scrollTriggeredArticle = winner.article;
+        this.scrollTriggeredId = winner.id;
         this.activeDistance = winner.distance;
         this.candidate = null;
         this.schedulePrefetch(items, winner.id);
@@ -737,15 +756,93 @@
       if (!this.candidate || this.candidate.id !== winner.id) {
         this.candidate = winner;
         this.candidateSince = now;
-        if (!this.activeId || force) this.activate(winner, items);
+        if (!this.activeId || force) {
+          this.scrollTriggeredArticle = winner.article;
+          this.scrollTriggeredId = winner.id;
+          this.activate(winner, items);
+        }
         return;
       }
       const heldLongEnough = now - this.candidateSince >= CONFIG.switchDebounceMs;
       const clearlyBetter = winner.distance + CONFIG.switchAdvantagePx < this.activeDistance;
-      if (heldLongEnough || clearlyBetter || force) this.activate(winner, items);
+      if (heldLongEnough || clearlyBetter || force) {
+        this.scrollTriggeredArticle = winner.article;
+        this.scrollTriggeredId = winner.id;
+        this.activate(winner, items);
+      }
+    }
+
+    clearHoverTimer() {
+      if (this.hoverTimer) {
+        clearTimeout(this.hoverTimer);
+        this.hoverTimer = null;
+      }
+      this.hoverTimerArticle = null;
+    }
+
+    onPointerMove(event) {
+      if (!this.enabled || !this.hoverLookahead || this.mode === 'PINNED') return;
+      if (event.target.closest('#xsr-pane, header[role="banner"]')) {
+        this.clearHoverTimer();
+        return;
+      }
+
+      const article = event.target.closest('article[data-testid="tweet"]');
+      if (!article) {
+        this.clearHoverTimer();
+        return;
+      }
+
+      // 如果当前文章已经被激活，则无需重复响应
+      if (article.classList.contains('xsr-active-tweet')) {
+        this.clearHoverTimer();
+        return;
+      }
+
+      // 核心基准：以最近一次滚动触发的推文为基准（或当前高亮推文）
+      const baselineArticle = this.scrollTriggeredArticle || document.querySelector('article.xsr-active-tweet');
+      if (!baselineArticle) return;
+
+      // 核心边界：必须在当前基准推文的【下方】
+      // 移动到原本触发 timeline 以上严格无效
+      if (article !== baselineArticle) {
+        const position = baselineArticle.compareDocumentPosition(article);
+        const isFollowing = Boolean(position & Node.DOCUMENT_POSITION_FOLLOWING);
+        const baselineRect = baselineArticle.getBoundingClientRect();
+        const targetRect = article.getBoundingClientRect();
+        const isVisuallyBelow = targetRect.top > baselineRect.top - 10;
+
+        if (!isFollowing || !isVisuallyBelow) {
+          this.clearHoverTimer();
+          return;
+        }
+      }
+
+      // 验证是下方的有效推文，防抖悬停后优先切换
+      if (this.hoverTimerArticle === article) return;
+      this.clearHoverTimer();
+      this.hoverTimerArticle = article;
+      this.hoverTimer = setTimeout(() => {
+        this.hoverTimer = null;
+        this.hoverTimerArticle = null;
+        if (!this.enabled || !this.hoverLookahead || this.mode === 'PINNED') return;
+        const tweet = extractDomTweet(article);
+        if (!tweet || tweet.id === this.activeId) return;
+
+        const rect = article.getBoundingClientRect();
+        this.activate({
+          id: tweet.id,
+          article,
+          tweet,
+          rect: { top: rect.top, bottom: rect.bottom, height: rect.height },
+          viewportHeight: window.innerHeight,
+          distance: 0
+        });
+      }, CONFIG.hoverDebounceMs);
     }
 
     activate(item, items = this.lastItems) {
+      this.clearHoverTimer();
       if (!item || item.id === this.activeId) return;
       this.activeId = item.id;
       this.activeDistance = item.distance;
@@ -802,6 +899,7 @@
     }
 
     onClick(event) {
+      this.clearHoverTimer();
       if (!this.enabled || event.defaultPrevented || event.button !== 0) return;
       if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
       if (event.target.closest('#xsr-pane')) return;
